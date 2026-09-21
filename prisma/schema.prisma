@@ -1,0 +1,158 @@
+generator client {
+  provider = "prisma-client-js"
+}
+datasource db {
+  provider = "postgresql"
+  url = env("DATABASE_URL")
+}
+
+enum MemberRole {
+  owner
+  editor
+  viewer
+}
+enum NodeType {
+  note
+  document
+  ai_response
+  task
+  decision
+  prompt
+  file
+  frame
+}
+
+model Profile {
+  id String @id @default(uuid()) @db.Uuid
+  email String @unique
+  name String
+  passwordHash String
+  createdAt DateTime @default(now()) @map("created_at")
+  projects Project[] @relation("ProjectOwner")
+  memberships ProjectMember[]
+  viewStates ProjectViewState[]
+  nodes CanvasNode[] @relation("NodeCreator")
+  @@map("profiles")
+}
+
+model Project {
+  id String @id @default(uuid()) @db.Uuid
+  ownerId String @map("owner_id") @db.Uuid
+  name String
+  description String?
+  icon String @default("◈")
+  color String @default("#7c3aed")
+  projectSummary String? @map("project_summary")
+  isArchived Boolean @default(false) @map("is_archived")
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+  owner Profile @relation("ProjectOwner", fields: [ownerId], references: [id], onDelete: Cascade)
+  members ProjectMember[]
+  nodes CanvasNode[]
+  edges CanvasEdge[]
+  viewStates ProjectViewState[]
+  conversations Conversation[]
+  attachments Attachment[]
+  @@index([ownerId, updatedAt])
+  @@map("projects")
+}
+
+model ProjectMember {
+  projectId String @map("project_id") @db.Uuid
+  userId String @map("user_id") @db.Uuid
+  role MemberRole
+  project Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  user Profile @relation(fields: [userId], references: [id], onDelete: Cascade)
+  @@id([projectId, userId])
+  @@map("project_members")
+}
+
+model CanvasNode {
+  id String @id @default(uuid()) @db.Uuid
+  projectId String @map("project_id") @db.Uuid
+  type NodeType
+  title String
+  content String @default("")
+  status String?
+  tags String[] @default([])
+  positionX Float @default(120) @map("position_x")
+  positionY Float @default(120) @map("position_y")
+  width Float @default(240)
+  height Float @default(160)
+  parentNodeId String? @map("parent_node_id") @db.Uuid
+  sourceType String? @map("source_type")
+  sourceMessageId String? @map("source_message_id") @db.Uuid
+  metadata Json @default("{}")
+  createdBy String @map("created_by") @db.Uuid
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+  project Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  creator Profile @relation("NodeCreator", fields: [createdBy], references: [id])
+  parent CanvasNode? @relation("NodeParent", fields: [parentNodeId], references: [id], onDelete: SetNull)
+  children CanvasNode[] @relation("NodeParent")
+  sourceEdges CanvasEdge[] @relation("EdgeSource")
+  targetEdges CanvasEdge[] @relation("EdgeTarget")
+  @@index([projectId, updatedAt])
+  @@map("canvas_nodes")
+}
+
+model CanvasEdge {
+  id String @id @default(uuid()) @db.Uuid
+  projectId String @map("project_id") @db.Uuid
+  sourceNodeId String @map("source_node_id") @db.Uuid
+  targetNodeId String @map("target_node_id") @db.Uuid
+  relationType String @map("relation_type")
+  label String?
+  metadata Json @default("{}")
+  createdAt DateTime @default(now()) @map("created_at")
+  project Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  sourceNode CanvasNode @relation("EdgeSource", fields: [sourceNodeId], references: [id], onDelete: Cascade)
+  targetNode CanvasNode @relation("EdgeTarget", fields: [targetNodeId], references: [id], onDelete: Cascade)
+  @@unique([sourceNodeId, targetNodeId, relationType])
+  @@index([projectId])
+  @@map("canvas_edges")
+}
+
+model ProjectViewState {
+  projectId String @map("project_id") @db.Uuid
+  userId String @map("user_id") @db.Uuid
+  viewportX Float @default(0) @map("viewport_x")
+  viewportY Float @default(0) @map("viewport_y")
+  zoom Float @default(1)
+  rightPanelOpen Boolean @default(true) @map("right_panel_open")
+  rightPanelWidth Float @default(340) @map("right_panel_width")
+  updatedAt DateTime @updatedAt @map("updated_at")
+  project Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  user Profile @relation(fields: [userId], references: [id], onDelete: Cascade)
+  @@id([projectId, userId])
+  @@map("project_view_state")
+}
+
+model Conversation {
+  id String @id @default(uuid()) @db.Uuid
+  projectId String @map("project_id") @db.Uuid
+  createdAt DateTime @default(now()) @map("created_at")
+  project Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  messages Message[]
+  @@map("conversations")
+}
+model Message {
+  id String @id @default(uuid()) @db.Uuid
+  conversationId String @map("conversation_id") @db.Uuid
+  role String
+  content String
+  contextNodeIds String[] @default([]) @map("context_node_ids")
+  createdAt DateTime @default(now()) @map("created_at")
+  conversation Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  @@map("messages")
+}
+model Attachment {
+  id String @id @default(uuid()) @db.Uuid
+  projectId String @map("project_id") @db.Uuid
+  nodeId String? @map("node_id") @db.Uuid
+  name String
+  url String
+  createdAt DateTime @default(now()) @map("created_at")
+  project Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  @@map("attachments")
+}
