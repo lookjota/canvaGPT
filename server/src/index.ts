@@ -7,7 +7,7 @@ import { db } from './db.js';
 import { env } from './env.js';
 import { hashPassword, requireAuth, requireProjectMember, setSession, verifyPassword } from './auth.js';
 
-const app = express();
+export const app = express();
 app.use(cors({ origin: env.WEB_ORIGIN, credentials: true }));
 app.use(express.json({ limit: '2mb' }));
 app.use(cookieParser());
@@ -19,7 +19,8 @@ app.post('/api/auth/register', asyncRoute(async (req, res) => {
   const input = z.object({ name: z.string().trim().min(1).max(80), email: z.string().email().transform(v => v.toLowerCase()), password: z.string().min(8).max(200) }).parse(req.body);
   const exists = await db.profile.findUnique({ where: { email: input.email } });
   if (exists) return res.status(409).json({ error: 'EMAIL_IN_USE' });
-  const user = await db.profile.create({ data: { ...input, passwordHash: await hashPassword(input.password) } });
+  const passwordHash = await hashPassword(input.password);
+  const user = await db.profile.create({ data: { name: input.name, email: input.email, passwordHash } });
   setSession(res, user.id); res.status(201).json({ user: { id: user.id, name: user.name, email: user.email } });
 }));
 app.post('/api/auth/login', asyncRoute(async (req, res) => {
@@ -57,5 +58,12 @@ app.patch('/api/projects/:projectId/edges/:edgeId', requireAuth, asyncRoute(asyn
 app.delete('/api/projects/:projectId/edges/:edgeId', requireAuth, asyncRoute(async (req, res) => { const projectId = id.parse(req.params.projectId); if (!(await requireProjectMember(projectId, req.userId!, true))) return res.status(404).json({ error: 'NOT_FOUND' }); await db.canvasEdge.deleteMany({ where: { id: id.parse(req.params.edgeId), projectId } }); res.status(204).end(); }));
 app.put('/api/projects/:projectId/view-state', requireAuth, asyncRoute(async (req, res) => { const projectId = id.parse(req.params.projectId); if (!(await requireProjectMember(projectId, req.userId!))) return res.status(404).json({ error: 'NOT_FOUND' }); const input = z.object({ viewportX: z.number().finite(), viewportY: z.number().finite(), zoom: z.number().min(.25).max(2.5), rightPanelOpen: z.boolean().optional(), rightPanelWidth: z.number().min(280).max(600).optional() }).parse(req.body); const viewState = await db.projectViewState.upsert({ where: { projectId_userId: { projectId, userId: req.userId! } }, create: { projectId, userId: req.userId!, ...input }, update: input }); res.json({ viewState }); }));
 
-app.use((err: unknown, _req: express.Request, res: express.Response, _next: express.NextFunction) => { console.error(err); if (err instanceof z.ZodError) return res.status(400).json({ error: 'VALIDATION_ERROR', details: err.issues }); res.status(500).json({ error: 'INTERNAL_ERROR' }); });
-app.listen(env.PORT, () => console.log(`Orion API listening on http://localhost:${env.PORT}`));
+app.use((err: unknown, _req: express.Request, res: express.Response, _next: express.NextFunction) => {
+  if (err instanceof z.ZodError) return res.status(400).json({ error: 'VALIDATION_ERROR', details: err.issues });
+  const prismaError = err as { code?: unknown };
+  if (prismaError.code === 'P2002') return res.status(409).json({ error: 'EMAIL_IN_USE' });
+  console.error(err instanceof Error ? err.name : 'Unknown server error');
+  res.status(500).json({ error: 'INTERNAL_ERROR' });
+});
+
+if (process.env.NODE_ENV !== 'test') app.listen(env.PORT, () => console.log(`Orion API listening on http://localhost:${env.PORT}`));
