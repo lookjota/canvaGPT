@@ -3,6 +3,7 @@ import { createRoot } from 'react-dom/client';
 import { BrowserRouter, Link, Navigate, Route, Routes, useNavigate, useParams } from 'react-router-dom';
 import { api, type Node, type NodeType, type Project } from './api';
 import { clampZoom, constrainNodeSize, dragDelta, fitView, normalizeViewport, screenToWorld, zoomAroundPoint, type Point, type Viewport } from './canvasGeometry';
+import { SerializedSaveQueue } from './persistence';
 import './styles.css';
 
 const labels: Record<NodeType, string> = { note: 'Nota', task: 'Tarefa', decision: 'Decisão', document: 'Documento', prompt: 'Prompt', file: 'Arquivo', ai_response: 'Resposta IA', frame: 'Frame' };
@@ -26,18 +27,96 @@ function Workspace() {
   const [tool, setTool] = useState<'select' | 'pan'>('select');
   const [status, setStatus] = useState<SaveStatus>('Salvo');
   const canvas = useRef<HTMLDivElement>(null);
-  const saveTimers = useRef<Record<string, number>>({});
-  const viewTimer = useRef<number | null>(null);
+  const nodeSnapshots = useRef(new Map<string, Node>());
+  const cancelledCreates = useRef(new Set<string>());
+  const createPromises = useRef(new Map<string, Promise<Node>>());
+  const nodeQueue = useRef<SerializedSaveQueue | null>(null);
+  const viewQueue = useRef<SerializedSaveQueue | null>(null);
   const pan = useRef<{ start: Point; view: Viewport } | null>(null);
+  const refreshStatus = useCallback(() => {
+    if (nodeQueue.current?.hasPending() || viewQueue.current?.hasPending()) setStatus('Salvando…');
+    else setStatus('Salvo');
+  }, []);
 
-  useEffect(() => { if (!projectId) return; api.project(projectId).then(result => { setProject(result.project); setNodes(result.project.nodes); if (result.viewState) setView(normalizeViewport({ x: result.viewState.viewportX, y: result.viewState.viewportY, zoom: result.viewState.zoom })); }); }, [projectId]);
-  useEffect(() => () => { Object.values(saveTimers.current).forEach(window.clearTimeout); if (viewTimer.current) window.clearTimeout(viewTimer.current); }, []);
-  const persistView = useCallback((next: Viewport, immediate = false) => { if (!projectId) return; setStatus('Salvando…'); if (viewTimer.current) window.clearTimeout(viewTimer.current); const save = () => api.saveView(projectId, { viewportX: next.x, viewportY: next.y, zoom: next.zoom }).then(() => setStatus('Salvo')).catch(() => setStatus('Erro')); if (immediate) save(); else viewTimer.current = window.setTimeout(save, 600); }, [projectId]);
+  useEffect(() => {
+    if (!projectId) return;
+    let active = true;
+    nodeQueue.current = new SerializedSaveQueue((id, snapshot) => {
+      if (id.startsWith('temp-')) {
+        const creation = createPromises.current.get(id);
+        if (!creation) return Promise.resolve();
+        return creation.then(node => cancelledCreates.current.has(id) ? undefined : api.updateNode(projectId, node.id, snapshot).then(() => undefined));
+      }
+      return api.updateNode(projectId, id, snapshot).then(() => undefined);
+    }, 600, () => setStatus('Erro'), refreshStatus);
+    viewQueue.current = new SerializedSaveQueue((_id, snapshot) => api.saveView(projectId, snapshot).then(() => undefined), 600, () => setStatus('Erro'), refreshStatus);
+    api.project(projectId).then(result => {
+      if (!active) return;
+      setProject(result.project);
+      nodeSnapshots.current = new Map(result.project.nodes.map(node => [node.id, node]));
+      setNodes(result.project.nodes);
+      if (result.viewState) setView(normalizeViewport({ x: result.viewState.viewportX, y: result.viewState.viewportY, zoom: result.viewState.zoom }));
+      refreshStatus();
+    }).catch(() => active && setStatus('Erro'));
+    const flush = () => { void nodeQueue.current?.flush(); void viewQueue.current?.flush(); };
+    window.addEventListener('pagehide', flush);
+    return () => { active = false; window.removeEventListener('pagehide', flush); flush(); };
+  }, [projectId, refreshStatus]);
+  const persistView = useCallback((next: Viewport, immediate = false) => {
+    if (!projectId || !viewQueue.current) return;
+    setStatus('Salvando…');
+    viewQueue.current.schedule(projectId, { viewportX: next.x, viewportY: next.y, zoom: next.zoom }, immediate);
+  }, [projectId]);
   const changeView = (next: Viewport, immediate = false) => { const normalized = normalizeViewport(next); setView(normalized); persistView(normalized, immediate); };
-  const persistNode = useCallback((id: string, patch: Partial<Node>, immediate = false) => { if (!projectId) return; setStatus('Salvando…'); if (saveTimers.current[id]) window.clearTimeout(saveTimers.current[id]); const save = () => api.updateNode(projectId, id, patch).then(() => setStatus('Salvo')).catch(() => setStatus('Erro')); if (immediate) save(); else saveTimers.current[id] = window.setTimeout(save, 600); }, [projectId]);
-  const updateNode = (id: string, patch: Partial<Node>, immediate = false) => { setNodes(current => current.map(node => node.id === id ? { ...node, ...patch } : node)); persistNode(id, patch, immediate); };
-  const addNode = async (type: NodeType) => { if (!projectId || !canvas.current) return; const rect = canvas.current.getBoundingClientRect(); const center = screenToWorld({ x: rect.width / 2, y: rect.height / 2 }, view); const offset = nodes.length * 28; const { node } = await api.createNode(projectId, { type, title: labels[type], content: '', positionX: center.x - 120 + offset, positionY: center.y - 80 + offset }); setNodes(current => [...current, node]); setSelected(node.id); setStatus('Salvo'); };
-  const removeNode = async (id: string) => { if (!projectId) return; try { await api.deleteNode(projectId, id); setNodes(current => current.filter(node => node.id !== id)); if (selected === id) setSelected(null); setStatus('Salvo'); } catch { setStatus('Erro'); } };
+  const persistNode = useCallback((id: string, snapshot: Node, immediate = false) => {
+    if (!projectId || !nodeQueue.current) return;
+    setStatus('Salvando…');
+    nodeQueue.current.schedule(id, { type: snapshot.type, title: snapshot.title, content: snapshot.content, positionX: snapshot.positionX, positionY: snapshot.positionY, width: snapshot.width, height: snapshot.height, status: snapshot.status, tags: snapshot.tags }, immediate);
+  }, [projectId]);
+  const updateNode = (id: string, patch: Partial<Node>, immediate = false) => {
+    const current = nodeSnapshots.current.get(id);
+    if (!current) return;
+    const next = { ...current, ...patch };
+    nodeSnapshots.current.set(id, next);
+    setNodes(nodesNow => nodesNow.map(node => node.id === id ? next : node));
+    persistNode(id, next, immediate);
+  };
+  const addNode = async (type: NodeType) => {
+    if (!projectId || !canvas.current) return;
+    const rect = canvas.current.getBoundingClientRect();
+    const center = screenToWorld({ x: rect.width / 2, y: rect.height / 2 }, view);
+    const offset = nodeSnapshots.current.size * 28;
+    const tempId = `temp-${crypto.randomUUID()}`;
+    const optimistic: Node = { id: tempId, type, title: labels[type], content: '', positionX: center.x - 120 + offset, positionY: center.y - 80 + offset, width: 240, height: 160, status: null, tags: [] };
+    nodeSnapshots.current.set(tempId, optimistic);
+    setNodes(current => [...current, optimistic]);
+    setSelected(tempId);
+    setStatus('Salvando…');
+    try {
+      const creation = api.createNode(projectId, { type: optimistic.type, title: optimistic.title, content: optimistic.content, positionX: optimistic.positionX, positionY: optimistic.positionY, width: optimistic.width, height: optimistic.height }).then(result => result.node);
+      createPromises.current.set(tempId, creation);
+      const node = await creation;
+      if (cancelledCreates.current.delete(tempId)) {
+        await api.deleteNode(projectId, node.id);
+        nodeSnapshots.current.delete(tempId);
+        createPromises.current.delete(tempId);
+        return;
+      }
+      const latest = nodeSnapshots.current.get(tempId) ?? optimistic;
+      nodeSnapshots.current.delete(tempId);
+      nodeSnapshots.current.set(node.id, { ...node, ...latest, id: node.id });
+      setNodes(current => current.map(item => item.id === tempId ? { ...node, ...latest, id: node.id } : item));
+      if (selected === tempId) setSelected(node.id);
+      nodeQueue.current?.rekey(tempId, node.id);
+      persistNode(node.id, { ...node, ...latest, id: node.id }, true);
+      createPromises.current.delete(tempId);
+    } catch { createPromises.current.delete(tempId); nodeSnapshots.current.delete(tempId); setNodes(current => current.filter(item => item.id !== tempId)); setStatus('Erro'); }
+  };
+  const removeNode = async (id: string) => {
+    if (!projectId) return;
+    if (id.startsWith('temp-')) { cancelledCreates.current.add(id); nodeQueue.current?.cancel(id); nodeSnapshots.current.delete(id); setNodes(current => current.filter(node => node.id !== id)); return; }
+    try { await nodeQueue.current?.flush(id); await api.deleteNode(projectId, id); nodeSnapshots.current.delete(id); setNodes(current => current.filter(node => node.id !== id)); if (selected === id) setSelected(null); refreshStatus(); } catch { setStatus('Erro'); }
+  };
   const zoomAt = (screenPoint: Point, factor: number) => changeView(zoomAroundPoint(view, screenPoint, clampZoom(view.zoom * factor)), false);
   const fit = () => { const rect = canvas.current?.getBoundingClientRect(); if (!rect) return; changeView(fitView(nodes, { width: rect.width, height: rect.height }), true); };
   const onCanvasPointerDown = (event: React.PointerEvent<HTMLDivElement>) => { if (event.target !== event.currentTarget) return; setSelected(null); if (tool === 'pan' || event.button === 1) { pan.current = { start: { x: event.clientX, y: event.clientY }, view }; event.currentTarget.setPointerCapture(event.pointerId); } };

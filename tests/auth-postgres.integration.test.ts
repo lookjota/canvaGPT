@@ -102,6 +102,24 @@ describe('auth and PostgreSQL persistence', () => {
     expect(createdNode.response.status).toBe(201);
     nodeId = (createdNode.json as { node: { id: string } }).node.id;
 
+    const stressNodes: Array<{ type: 'note' | 'task' | 'decision'; title: string }> = [
+      { type: 'note', title: 'Note 1' }, { type: 'note', title: 'Note 2' }, { type: 'note', title: 'Note 3' },
+      { type: 'task', title: 'Task 1' }, { type: 'task', title: 'Task 2' },
+      { type: 'decision', title: 'Decision 1' }, { type: 'decision', title: 'Decision 2' },
+    ];
+    const stressIds: string[] = [];
+    for (const [index, item] of stressNodes.entries()) {
+      const created = await request(`/api/projects/${projectId}/nodes`, { method: 'POST', body: JSON.stringify({ ...item, content: 'initial', positionX: index, positionY: index, width: 240, height: 160 }) }, cookieA);
+      expect(created.response.status).toBe(201);
+      stressIds.push((created.json as { node: { id: string } }).node.id);
+    }
+    for (const [index, stressId] of stressIds.entries()) {
+      for (const revision of [1, 2, 3]) {
+        const update = await request(`/api/projects/${projectId}/nodes/${stressId}`, { method: 'PATCH', body: JSON.stringify({ title: `${stressNodes[index].title} v${revision}`, content: `content ${revision}`, positionX: index * 10 + revision, positionY: index * 20 + revision, width: 240 + revision, height: 160 + revision }) }, cookieA);
+        expect(update.response.status).toBe(200);
+      }
+    }
+
     const savedView = await request(`/api/projects/${projectId}/view-state`, { method: 'PUT', body: JSON.stringify({ viewportX: 42, viewportY: -18, zoom: 1.25 }) }, cookieA);
     expect(savedView.response.status).toBe(200);
 
@@ -109,6 +127,10 @@ describe('auth and PostgreSQL persistence', () => {
     expect(readBack.response.status).toBe(200);
     const project = (readBack.json as { project: { nodes: Array<Record<string, unknown>> }; viewState: Record<string, unknown> }).project;
     expect(project.nodes[0]).toMatchObject({ title: 'Node A', content: 'Content A', positionX: 10, positionY: 20, width: 300, height: 180 });
+    for (const [index, stressId] of stressIds.entries()) {
+      const persisted = project.nodes.find(node => node.id === stressId);
+      expect(persisted).toMatchObject({ id: stressId, projectId, type: stressNodes[index].type, title: `${stressNodes[index].title} v3`, content: 'content 3', positionX: index * 10 + 3, positionY: index * 20 + 3, width: 243, height: 163 });
+    }
     expect((readBack.json as { viewState: Record<string, unknown> }).viewState).toMatchObject({ viewportX: 42, viewportY: -18, zoom: 1.25 });
 
     for (const attempt of [
