@@ -1,6 +1,7 @@
 import 'dotenv/config';
 import OpenAI from 'openai';
 import { env } from './env.js';
+import { hasExplicitVisualCreationRequest } from './visualProposal.js';
 
 export type AiInput = { message: string; history: Array<{ role: 'user' | 'assistant'; content: string }>; context: string };
 export type AiResult = { content: string; proposedActions?: unknown };
@@ -8,7 +9,16 @@ export interface AiProvider { generate(input: AiInput): Promise<AiResult>; }
 
 export class MockAiProvider implements AiProvider {
   static lastInput: AiInput | null = null;
-  async generate(input: AiInput): Promise<AiResult> { MockAiProvider.lastInput = input; return { content: `Mock Orion response: ${input.message}${input.context ? `\nContext received (${input.context.length} characters).` : ''}` }; }
+  async generate(input: AiInput): Promise<AiResult> {
+    MockAiProvider.lastInput = input;
+    const content = `Mock Orion response: ${input.message}${input.context ? `\nContext received (${input.context.length} characters).` : ''}`;
+    if (!hasExplicitVisualCreationRequest(input.message)) return { content };
+    const count = /\b(?:3|tr[eê]s)\b/i.test(input.message) ? 3 : 1;
+    return {
+      content: 'Preparei uma proposta visual aguardando revisão.',
+      proposedActions: Array.from({ length: count }, (_, index) => ({ type: 'CREATE_NODE', clientActionId: `mock-action-${index + 1}`, nodeType: 'NOTE', title: `Bloco ${index + 1}`, content: `Conteúdo do bloco ${index + 1}` })),
+    };
+  }
 }
 
 export class OpenAiProvider implements AiProvider {

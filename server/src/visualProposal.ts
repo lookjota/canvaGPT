@@ -42,6 +42,27 @@ export const providerVisualResponse = z.object({
 export type VisualProposalPayload = z.infer<typeof visualProposalPayload>;
 export type ProposedAction = z.infer<typeof createNodeAction>;
 
+const explicitVisualRequestPatterns = [
+  /\b(?:crie|criar|cria|adicione|adicionar|monte|montar|gere|gerar|produza|produzir)\b[\s\S]{0,120}\b(?:canvas|blocos?|nodes?|elementos?|cartões?|cartoes?)\b/i,
+  /\b(?:organize|organizar|estruture|estruturar|decomponha|decompor|distribua|distribuir|proponha|propor)\b[\s\S]{0,120}\b(?:canvas|blocos?|nodes?|elementos?|cartões?|cartoes?|visual(?:mente)?|estrutura)\b/i,
+  /\b(?:canvas|blocos?|nodes?|elementos?|cartões?|cartoes?)\b[\s\S]{0,80}\b(?:crie|criar|adicione|adicionar|monte|montar|gere|gerar|organize|organizar|estruture|estruturar|decomponha|decompor|proponha|propor)\b/i,
+];
+
+const confirmationPatterns = [
+  /^(?:ok|okay|certo|confirmo|aprovado|aprovada|rejeitado|rejeitada|cancele|cancelado|cancelada|obrigado|obrigada)(?:[\s,!.:-]*(?:ok|okay|confirmo|aprovado|aprovada|pode seguir|rejeitado|rejeitada|cancele|cancelado|cancelada))?[\s.!?]*$/i,
+  /^pode seguir[\s.!?]*$/i,
+];
+
+export function hasExplicitVisualCreationRequest(message: string): boolean {
+  const normalized = message.trim();
+  if (!normalized || confirmationPatterns.some(pattern => pattern.test(normalized)) || /^(?:como|o que|qual|quais|por que|quando|onde|posso)\b/i.test(normalized)) return false;
+  return explicitVisualRequestPatterns.some(pattern => pattern.test(normalized));
+}
+
+export function isConfirmationOrProposalFollowUp(message: string): boolean {
+  return confirmationPatterns.some(pattern => pattern.test(message.trim()));
+}
+
 export function validateProviderVisualResponse(content: string, proposedActions: unknown): { payload: VisualProposalPayload | null; assistantText: string } {
   const assistantText = content.trim().slice(0, MAX_ASSISTANT_TEXT_LENGTH);
   const parsed = providerVisualResponse.safeParse({ assistantText, proposedActions: proposedActions ?? [] });

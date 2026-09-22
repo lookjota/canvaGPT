@@ -9,7 +9,7 @@ import { hashPassword, requireAuth, requireProjectMember, setSession, verifyPass
 import { assertContextLimits, buildConversationContext, buildProjectMemoryContext } from './contextBuilder.js';
 import { createAiProvider, MockAiProvider, type AiProvider } from './aiProvider.js';
 import { projectMemoryCreateInput, projectMemoryKind, projectMemoryUpdateInput } from './projectMemory.js';
-import { parseStoredVisualProposal, validateProviderVisualResponse } from './visualProposal.js';
+import { hasExplicitVisualCreationRequest, isConfirmationOrProposalFollowUp, parseStoredVisualProposal, validateProviderVisualResponse } from './visualProposal.js';
 
 export function createApp(options: { aiProvider?: AiProvider } = {}) {
 const app = express();
@@ -154,7 +154,11 @@ app.post('/api/projects/:projectId/conversations/:conversationId/messages', requ
   const userMessage = await db.message.create({ data: { conversationId, role: 'user', content: input.content, contextNodeIds: uniqueIds, contextNodes: { create: nodes.map(node => ({ nodeId: node.id, titleSnapshot: node.title, typeSnapshot: node.type, contentSnapshot: node.content })) }, contextMemories: { create: memorySnapshots } }, include: snapshotInclude });
   try {
     const result = await (options.aiProvider ?? createAiProvider()).generate({ message: input.content, history, context: fullContext });
-    const visual = validateProviderVisualResponse(result.content, result.proposedActions);
+    const explicitVisualRequest = hasExplicitVisualCreationRequest(input.content);
+    const visual = validateProviderVisualResponse(result.content, explicitVisualRequest ? result.proposedActions : undefined);
+    if (!explicitVisualRequest && isConfirmationOrProposalFollowUp(input.content)) {
+      visual.assistantText = 'A proposta permanece aguardando revisão. A aplicação ao canvas ainda não está disponível.';
+    }
     const assistant = await db.$transaction(async tx => {
       const message = await tx.message.create({ data: { conversationId, role: 'assistant', content: visual.assistantText, contextMemories: { create: memorySnapshots } }, include: snapshotInclude });
       if (visual.payload) await tx.visualProposal.create({ data: { projectId, conversationId, assistantMessageId: message.id, protocolVersion: visual.payload.protocolVersion, payload: visual.payload } });

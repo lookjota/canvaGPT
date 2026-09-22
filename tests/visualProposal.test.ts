@@ -1,9 +1,21 @@
 import { describe, expect, it } from 'vitest';
-import { MAX_ACTION_CONTENT_LENGTH, MAX_PROPOSED_ACTIONS, createNodeAction, providerVisualResponse, validateProviderVisualResponse, visualProposalPayload } from '../server/src/visualProposal.js';
+import { MAX_ACTION_CONTENT_LENGTH, MAX_PROPOSED_ACTIONS, createNodeAction, hasExplicitVisualCreationRequest, providerVisualResponse, validateProviderVisualResponse, visualProposalPayload } from '../server/src/visualProposal.js';
+import { MockAiProvider } from '../server/src/aiProvider.js';
 
 const action = { type: 'CREATE_NODE', clientActionId: 'action-1', nodeType: 'TASK', title: 'Produzir capa', content: 'Criar a capa oficial' } as const;
 
 describe('visual action protocol', () => {
+  it('requires an explicit visual creation request', async () => {
+    expect(hasExplicitVisualCreationRequest('Crie três blocos no canvas')).toBe(true);
+    expect(hasExplicitVisualCreationRequest('Organize isto no canvas')).toBe(true);
+    expect(hasExplicitVisualCreationRequest('Como criar blocos no canvas?')).toBe(false);
+    for (const message of ['ok', 'aprovado', 'ok, aprovado', 'confirmo', 'pode seguir', 'obrigado', 'cancele', 'rejeitado']) {
+      expect(hasExplicitVisualCreationRequest(message)).toBe(false);
+    }
+    const mock = new MockAiProvider();
+    expect((await mock.generate({ message: 'Crie três blocos no canvas', history: [], context: '' })).proposedActions).toHaveLength(3);
+    expect((await mock.generate({ message: 'ok, aprovado', history: [], context: '' })).proposedActions).toBeUndefined();
+  });
   it('accepts text without actions and valid one/multiple CREATE_NODE actions', () => {
     expect(validateProviderVisualResponse('Resposta normal', undefined).payload).toBeNull();
     expect(providerVisualResponse.parse({ assistantText: 'Preparei.', proposedActions: [action] }).proposedActions).toHaveLength(1);
