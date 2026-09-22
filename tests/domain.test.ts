@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import { readFileSync } from 'node:fs';
 import { anchorPoint, boundingBox, chooseEdgeAnchors, clampZoom, connectionPreviewCurve, constrainNodeSize, cubicBezierPoint, dragDelta, edgeCurve, edgeEndpoints, findConnectionTarget, fitView, intersectsRect, isEditableTarget, normalizeViewport, panViewport, pointToRectDistance, rectFromPoints, screenToWorld, worldToScreen, zoomAroundPoint } from '../web/src/canvasGeometry';
 
 describe('canvas geometry', () => {
@@ -6,6 +7,34 @@ describe('canvas geometry', () => {
     const view = { x: 40, y: 20, zoom: 2 };
     expect(screenToWorld({ x: 140, y: 80 }, view)).toEqual({ x: 50, y: 30 });
     expect(worldToScreen({ x: 50, y: 30 }, view)).toEqual({ x: 140, y: 80 });
+  });
+
+  it.each([0.5, 1, 2])('maps world coordinates at zoom %s', (zoom) => {
+    const view = { x: 40, y: 20, zoom };
+    const world = { x: 120, y: 80 };
+    expect(worldToScreen(world, view)).toEqual({ x: 40 + world.x * zoom, y: 20 + world.y * zoom });
+    expect(screenToWorld(worldToScreen(world, view), view)).toEqual(world);
+  });
+
+  it('keeps node dimensions in world units while the viewport changes', () => {
+    const node = { positionX: 10, positionY: 20, width: 320, height: 180 };
+    const original = { ...node };
+    for (const zoom of [0.5, 1, 2]) {
+      const topLeft = worldToScreen({ x: node.positionX, y: node.positionY }, { x: 0, y: 0, zoom });
+      const bottomRight = worldToScreen({ x: node.positionX + node.width, y: node.positionY + node.height }, { x: 0, y: 0, zoom });
+      expect(bottomRight.x - topLeft.x).toBe(node.width * zoom);
+      expect(bottomRight.y - topLeft.y).toBe(node.height * zoom);
+      expect(node).toEqual(original);
+    }
+  });
+
+  it('keeps node content inside the shared world transform', () => {
+    const source = readFileSync(new URL('../web/src/main.tsx', import.meta.url), 'utf8');
+    expect(source).toContain('className="world"');
+    expect(source).toContain("translate(' + view.x + 'px, ' + view.y + 'px) scale(' + view.zoom + ')");
+    expect(source).not.toContain('node.width * zoom');
+    expect(source).not.toContain('node.height * zoom');
+    expect(source).not.toContain('fontSize =');
   });
 
   it('converts drag deltas according to zoom', () => {
