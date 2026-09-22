@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { readFileSync } from 'node:fs';
-import { anchorPoint, boundingBox, chooseEdgeAnchors, clampZoom, connectionPreviewCurve, constrainNodeSize, cubicBezierPoint, dragDelta, edgeCurve, edgeEndpoints, findConnectionTarget, fitView, intersectsRect, isEditableTarget, normalizeViewport, panViewport, pointToRectDistance, rectFromPoints, screenToWorld, worldToScreen, zoomAroundPoint } from '../web/src/canvasGeometry';
+import { anchorPoint, boundingBox, candidateRouteClear, chooseEdgeAnchors, clampZoom, connectionPreviewCurve, constrainNodeSize, cubicBezierPoint, dragDelta, edgeCurve, edgeEndpoints, expandedBounds, findConnectionTarget, fitView, intersectsRect, isEditableTarget, normalizeViewport, panViewport, pointToRectDistance, rectFromPoints, routeEdge, routeIntersectsObstacle, screenToWorld, segmentIntersectsRect, worldToScreen, zoomAroundPoint } from '../web/src/canvasGeometry';
 
 describe('canvas geometry', () => {
   it('converts screen and world coordinates in both directions', () => {
@@ -138,5 +138,67 @@ describe('canvas geometry', () => {
     expect(isEditableTarget({ tagName: 'SELECT' } as unknown as EventTarget)).toBe(true);
     expect(isEditableTarget({ isContentEditable: true } as unknown as EventTarget)).toBe(true);
     expect(isEditableTarget({ tagName: 'DIV' } as unknown as EventTarget)).toBe(false);
+  });
+
+  it('routes directly when the corridor is clear and keeps source/target out of obstacles', () => {
+    const source = { positionX: 0, positionY: 100, width: 100, height: 80 };
+    const target = { positionX: 500, positionY: 100, width: 100, height: 80 };
+    const route = routeEdge(source, target, [source, target]);
+    expect(route.routed).toBe(false);
+    expect(route.sourceAnchor).toBe('right');
+    expect(route.targetAnchor).toBe('left');
+    expect(route.path).toContain('Q');
+  });
+
+  it('routes above or below an obstacle and preserves expanded clearance', () => {
+    const source = { positionX: 0, positionY: 100, width: 100, height: 80 };
+    const target = { positionX: 500, positionY: 100, width: 100, height: 80 };
+    const obstacle = { positionX: 250, positionY: 80, width: 100, height: 120 };
+    const route = routeEdge(source, target, [obstacle]);
+    expect(route.routed).toBe(true);
+    expect(route.points.length).toBeGreaterThan(4);
+    expect(candidateRouteClear(route.points, [obstacle])).toBe(true);
+    expect(routeIntersectsObstacle(route.points, obstacle)).toBe(false);
+    expect(route.path).toContain('Q');
+    expect(route.labelPoint.x).toBeGreaterThan(0);
+    expect(route.labelPoint.x).toBeLessThan(600);
+  });
+
+  it('chooses the shorter side, supports multiple obstacles, and returns to direct routing when moved away', () => {
+    const source = { positionX: 0, positionY: 200, width: 100, height: 80 };
+    const target = { positionX: 700, positionY: 200, width: 100, height: 80 };
+    const shortTop = { positionX: 300, positionY: 240, width: 100, height: 80 };
+    const route = routeEdge(source, target, [shortTop]);
+    expect(route.routed).toBe(true);
+    expect(Math.min(...route.points.map(point => point.y))).toBeLessThan(220);
+    const two = routeEdge(source, target, [shortTop, { positionX: 470, positionY: 240, width: 100, height: 80 }]);
+    expect(two.routed).toBe(true);
+    expect(two.points.every(point => Number.isFinite(point.x) && Number.isFinite(point.y))).toBe(true);
+    expect(routeEdge(source, target, [{ positionX: 300, positionY: 500, width: 100, height: 80 }]).routed).toBe(false);
+  });
+
+  it('exposes pure rectangle and segment clearance helpers', () => {
+    const node = { positionX: 100, positionY: 100, width: 80, height: 60 };
+    expect(expandedBounds(node, 20)).toEqual({ minX: 80, minY: 80, maxX: 200, maxY: 180 });
+    expect(segmentIntersectsRect({ x: 0, y: 130 }, { x: 300, y: 130 }, expandedBounds(node, 20))).toBe(true);
+    expect(segmentIntersectsRect({ x: 0, y: 0 }, { x: 300, y: 0 }, expandedBounds(node, 20))).toBe(false);
+  });
+
+  it('keeps routing geometry independent from viewport zoom', () => {
+    const source = { positionX: 0, positionY: 100, width: 100, height: 80 };
+    const target = { positionX: 500, positionY: 100, width: 100, height: 80 };
+    const obstacle = { positionX: 250, positionY: 80, width: 100, height: 120 };
+    const base = routeEdge(source, target, [obstacle]);
+    for (const zoom of [0.5, 1, 2]) expect(routeEdge(source, target, [obstacle])).toEqual(base);
+    expect(worldToScreen(base.labelPoint, { x: 40, y: 20, zoom: 2 })).not.toEqual(base.labelPoint);
+  });
+
+  it('is deterministic and finite for a stress graph with many nodes and edges', () => {
+    const nodes = Array.from({ length: 20 }, (_, index) => ({ positionX: (index % 5) * 260, positionY: Math.floor(index / 5) * 220, width: 160, height: 100 }));
+    const routes = nodes.flatMap((source, index) => nodes.slice(index + 1, index + 4).map(target => routeEdge(source, target, nodes.filter(node => node !== source && node !== target))));
+    expect(routes).toHaveLength(54);
+    expect(routes.every(route => route.points.length > 1 && route.path.length > 0 && route.points.flatMap(point => [point.x, point.y]).every(Number.isFinite))).toBe(true);
+    const repeat = nodes.slice(0, 4).flatMap((source, index) => nodes.slice(index + 1, index + 4).map(target => routeEdge(source, target, nodes.filter(node => node !== source && node !== target)).path));
+    expect(routes.slice(0, repeat.length).map(route => route.path)).toEqual(repeat);
   });
 });

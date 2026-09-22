@@ -12,9 +12,12 @@ export type Bounds = { minX: number; minY: number; maxX: number; maxY: number };
 export type GeometryNode = { positionX: number; positionY: number; width: number; height: number };
 export type Rect = { minX: number; minY: number; maxX: number; maxY: number };
 export type EdgeAnchor = 'top' | 'right' | 'bottom' | 'left';
-export type EdgeCurve = { start: Point; control1: Point; control2: Point; end: Point; midpoint: Point; sourceAnchor: EdgeAnchor; targetAnchor: EdgeAnchor };
+export type EdgeCurve = { start: Point; control1: Point; control2: Point; end: Point; midpoint: Point; sourceAnchor: EdgeAnchor; targetAnchor: EdgeAnchor; path?: string };
+export type EdgeRoute = EdgeCurve & { points: Point[]; path: string; labelPoint: Point; length: number; bends: number; routed: boolean };
 
 export const CONNECTION_SNAP_MARGIN = 18;
+export const EDGE_CLEARANCE = 28;
+export const EDGE_EXIT_DISTANCE = 72;
 
 export function isEditableTarget(target: EventTarget | null): boolean {
   let current: any = target;
@@ -113,6 +116,129 @@ function anchorDirection(anchor: EdgeAnchor): Point {
   if (anchor === 'right') return { x: 1, y: 0 };
   if (anchor === 'bottom') return { x: 0, y: 1 };
   return { x: -1, y: 0 };
+}
+
+const anchors: EdgeAnchor[] = ['top', 'right', 'bottom', 'left'];
+const add = (a: Point, b: Point): Point => ({ x: a.x + b.x, y: a.y + b.y });
+const scale = (p: Point, amount: number): Point => ({ x: p.x * amount, y: p.y * amount });
+const distance = (a: Point, b: Point): number => Math.hypot(a.x - b.x, a.y - b.y);
+
+export function expandedBounds(node: GeometryNode, clearance = EDGE_CLEARANCE): Rect {
+  return { minX: node.positionX - clearance, minY: node.positionY - clearance, maxX: node.positionX + node.width + clearance, maxY: node.positionY + node.height + clearance };
+}
+
+function pointInRect(point: Point, rect: Rect): boolean {
+  return point.x > rect.minX && point.x < rect.maxX && point.y > rect.minY && point.y < rect.maxY;
+}
+
+function orientation(a: Point, b: Point, c: Point): number { return (b.x - a.x) * (c.y - a.y) - (b.y - a.y) * (c.x - a.x); }
+function onSegment(a: Point, b: Point, c: Point): boolean { return Math.min(a.x, c.x) - 0.001 <= b.x && b.x <= Math.max(a.x, c.x) + 0.001 && Math.min(a.y, c.y) - 0.001 <= b.y && b.y <= Math.max(a.y, c.y) + 0.001; }
+function segmentsIntersect(a: Point, b: Point, c: Point, d: Point): boolean {
+  const o1 = orientation(a, b, c); const o2 = orientation(a, b, d); const o3 = orientation(c, d, a); const o4 = orientation(c, d, b);
+  if (((o1 > 0 && o2 < 0) || (o1 < 0 && o2 > 0)) && ((o3 > 0 && o4 < 0) || (o3 < 0 && o4 > 0))) return true;
+  return (Math.abs(o1) < 0.001 && onSegment(a, c, b)) || (Math.abs(o2) < 0.001 && onSegment(a, d, b)) || (Math.abs(o3) < 0.001 && onSegment(c, a, d)) || (Math.abs(o4) < 0.001 && onSegment(c, b, d));
+}
+
+export function segmentIntersectsRect(start: Point, end: Point, rect: Rect): boolean {
+  if (pointInRect(start, rect) || pointInRect(end, rect)) return true;
+  const topLeft = { x: rect.minX, y: rect.minY }; const topRight = { x: rect.maxX, y: rect.minY };
+  const bottomRight = { x: rect.maxX, y: rect.maxY }; const bottomLeft = { x: rect.minX, y: rect.maxY };
+  return segmentsIntersect(start, end, topLeft, topRight) || segmentsIntersect(start, end, topRight, bottomRight) || segmentsIntersect(start, end, bottomRight, bottomLeft) || segmentsIntersect(start, end, bottomLeft, topLeft);
+}
+
+export function routeIntersectsObstacle(points: Point[], obstacle: GeometryNode | Rect, clearance = EDGE_CLEARANCE): boolean {
+  const rect = 'positionX' in obstacle ? expandedBounds(obstacle, clearance) : obstacle;
+  return points.some(point => pointInRect(point, rect)) || points.slice(1).some((point, index) => segmentIntersectsRect(points[index], point, rect));
+}
+
+export function candidateRouteClear(points: Point[], obstacles: GeometryNode[], clearance = EDGE_CLEARANCE): boolean {
+  return obstacles.every(obstacle => !routeIntersectsObstacle(points, obstacle, clearance));
+}
+
+function exitPoint(node: GeometryNode, anchor: EdgeAnchor, amount = EDGE_EXIT_DISTANCE): Point { return add(anchorPoint(node, anchor), scale(anchorDirection(anchor), amount)); }
+function rectCorners(rect: Rect): Point[] { return [{ x: rect.minX - 1, y: rect.minY - 1 }, { x: rect.maxX + 1, y: rect.minY - 1 }, { x: rect.maxX + 1, y: rect.maxY + 1 }, { x: rect.minX - 1, y: rect.maxY + 1 }]; }
+function pathLength(points: Point[]): number { return points.slice(1).reduce((total, point, index) => total + distance(points[index], point), 0); }
+
+function visibleRoute(start: Point, end: Point, obstacles: GeometryNode[], clearance: number): Point[] | null {
+  if (candidateRouteClear([start, end], obstacles, clearance)) return [start, end];
+  const expanded = obstacles.map(node => expandedBounds(node, clearance));
+  const graph = [start, end, ...expanded.flatMap(rectCorners)];
+  const distances = graph.map((_, index) => index === 0 ? 0 : Number.POSITIVE_INFINITY); const previous: Array<number | null> = graph.map(() => null); const visited = new Set<number>();
+  while (visited.size < graph.length) {
+    let current = -1; let best = Number.POSITIVE_INFINITY;
+    distances.forEach((value, index) => { if (!visited.has(index) && value < best) { best = value; current = index; } });
+    if (current < 0) break;
+    visited.add(current);
+    if (current === 1) break;
+    for (let next = 0; next < graph.length; next += 1) {
+      if (visited.has(next) || next === current) continue;
+      const segment = [graph[current], graph[next]];
+      if (!candidateRouteClear(segment, obstacles, clearance)) continue;
+      const bendPenalty = previous[current] === null ? 0 : 42;
+      const nextDistance = distances[current] + distance(graph[current], graph[next]) + bendPenalty;
+      if (nextDistance < distances[next]) { distances[next] = nextDistance; previous[next] = current; }
+    }
+  }
+  if (!Number.isFinite(distances[1])) return null;
+  const result: Point[] = []; for (let cursor: number | null = 1; cursor !== null; cursor = previous[cursor]) result.unshift(graph[cursor]);
+  return candidateRouteClear(result, obstacles, clearance) ? result : null;
+}
+
+function roundPath(points: Point[], radius = 28): { path: string; midpoint: Point } {
+  if (points.length < 2) return { path: '', midpoint: points[0] ?? { x: 0, y: 0 } };
+  if (points.length === 2) { const midpoint = { x: (points[0].x + points[1].x) / 2, y: (points[0].y + points[1].y) / 2 }; return { path: `M ${points[0].x} ${points[0].y} L ${points[1].x} ${points[1].y}`, midpoint }; }
+  let path = `M ${points[0].x} ${points[0].y}`;
+  const samples: Array<{ point: Point; length: number }> = [];
+  for (let index = 1; index < points.length - 1; index += 1) {
+    const before = points[index - 1]; const corner = points[index]; const after = points[index + 1];
+    const r = Math.min(radius, distance(before, corner) / 2, distance(corner, after) / 2);
+    const incoming = add(corner, scale({ x: before.x - corner.x, y: before.y - corner.y }, r / distance(before, corner)));
+    const outgoing = add(corner, scale({ x: after.x - corner.x, y: after.y - corner.y }, r / distance(corner, after)));
+    path += ` L ${incoming.x} ${incoming.y} Q ${corner.x} ${corner.y} ${outgoing.x} ${outgoing.y}`;
+    samples.push({ point: corner, length: distance(before, after) });
+  }
+  path += ` L ${points[points.length - 1].x} ${points[points.length - 1].y}`;
+  const midpoint = samples.sort((a, b) => b.length - a.length)[0]?.point ?? points[Math.floor(points.length / 2)];
+  return { path, midpoint };
+}
+
+function routeCost(points: Point[]): number { return pathLength(points) + Math.max(0, points.length - 2) * 42; }
+
+export function routeEdge(source: GeometryNode, target: GeometryNode, obstacles: GeometryNode[] = [], offset = 0, clearance = EDGE_CLEARANCE, preferred?: { sourceAnchor: EdgeAnchor; targetAnchor: EdgeAnchor }): EdgeRoute {
+  const usableObstacles = obstacles.filter(node => node !== source && node !== target);
+  const corridor = { minX: Math.min(source.positionX, target.positionX) - 220, minY: Math.min(source.positionY, target.positionY) - 220, maxX: Math.max(source.positionX + source.width, target.positionX + target.width) + 220, maxY: Math.max(source.positionY + source.height, target.positionY + target.height) + 220 };
+  const relevantObstacles = usableObstacles.filter(node => { const rect = expandedBounds(node, clearance); return rect.maxX >= corridor.minX && rect.minX <= corridor.maxX && rect.maxY >= corridor.minY && rect.minY <= corridor.maxY; });
+  const candidates: Array<{ points: Point[]; sourceAnchor: EdgeAnchor; targetAnchor: EdgeAnchor; cost: number }> = [];
+  const anchorPairs = relevantObstacles.length ? anchors.flatMap(sourceAnchor => anchors.map(targetAnchor => ({ sourceAnchor, targetAnchor }))) : [chooseEdgeAnchors(source, target)];
+  for (const { sourceAnchor, targetAnchor } of anchorPairs) {
+    const start = anchorPoint(source, sourceAnchor); const end = anchorPoint(target, targetAnchor);
+    const points = visibleRoute(exitPoint(source, sourceAnchor), exitPoint(target, targetAnchor), relevantObstacles, clearance);
+    if (!points) continue;
+    const complete = [start, ...points, end];
+    if (!candidateRouteClear(complete.slice(1, -1), relevantObstacles, clearance)) continue;
+    const directionalPenalty = (anchorDirection(sourceAnchor).x * (end.x - start.x) + anchorDirection(sourceAnchor).y * (end.y - start.y) < 0 ? 120 : 0) + (anchorDirection(targetAnchor).x * (start.x - end.x) + anchorDirection(targetAnchor).y * (start.y - end.y) < 0 ? 120 : 0);
+    const stabilityPenalty = preferred && (preferred.sourceAnchor !== sourceAnchor || preferred.targetAnchor !== targetAnchor) ? 36 : 0;
+    candidates.push({ points: complete, sourceAnchor, targetAnchor, cost: routeCost(complete) + directionalPenalty + stabilityPenalty });
+  }
+  const fallbackAnchors = chooseEdgeAnchors(source, target); const fallback = [anchorPoint(source, fallbackAnchors.sourceAnchor), anchorPoint(target, fallbackAnchors.targetAnchor)];
+  const chosen = candidates.sort((a, b) => a.cost - b.cost || a.sourceAnchor.localeCompare(b.sourceAnchor) || a.targetAnchor.localeCompare(b.targetAnchor))[0] ?? { points: fallback, ...fallbackAnchors, cost: routeCost(fallback) };
+  const routed = chosen.points.length > 4;
+  const laneNormal = { x: -(chosen.points[chosen.points.length - 1].y - chosen.points[0].y), y: chosen.points[chosen.points.length - 1].x - chosen.points[0].x };
+  const laneLength = Math.hypot(laneNormal.x, laneNormal.y) || 1;
+  const displayPoints = !routed && offset ? chosen.points.map((point, index) => index === 0 || index === chosen.points.length - 1 ? point : { x: point.x + laneNormal.x / laneLength * offset, y: point.y + laneNormal.y / laneLength * offset }) : chosen.points;
+  const rounded = roundPath(displayPoints);
+  const start = displayPoints[0]; const end = displayPoints[displayPoints.length - 1];
+  const sourceDirection = anchorDirection(chosen.sourceAnchor); const targetDirection = anchorDirection(chosen.targetAnchor);
+  const controlDistance = Math.max(EDGE_EXIT_DISTANCE, Math.min(180, distance(start, end) * 0.35));
+  const control1 = add(start, scale(sourceDirection, controlDistance)); const control2 = add(end, scale(targetDirection, controlDistance));
+  return { start, control1, control2, end, midpoint: rounded.midpoint, labelPoint: rounded.midpoint, sourceAnchor: chosen.sourceAnchor, targetAnchor: chosen.targetAnchor, points: displayPoints, path: rounded.path, length: pathLength(displayPoints), bends: Math.max(0, displayPoints.length - 2), routed };
+}
+
+const routeMemory = new Map<string, { sourceAnchor: EdgeAnchor; targetAnchor: EdgeAnchor }>();
+export function routeEdgeStable(key: string, source: GeometryNode, target: GeometryNode, obstacles: GeometryNode[] = [], offset = 0, clearance = EDGE_CLEARANCE): EdgeRoute {
+  const route = routeEdge(source, target, obstacles, offset, clearance, routeMemory.get(key));
+  routeMemory.set(key, { sourceAnchor: route.sourceAnchor, targetAnchor: route.targetAnchor });
+  return route;
 }
 
 function curvature(source: GeometryNode, target: GeometryNode, sourceAnchor: EdgeAnchor, targetAnchor: EdgeAnchor): number {
