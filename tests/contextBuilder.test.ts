@@ -33,7 +33,7 @@ describe('conversation context', () => {
   });
   it('provides a deterministic mock without external API calls', async () => {
     const response = await new MockAiProvider().generate({ message: 'Oi', history: [], context: 'PROJECT CONTEXT' });
-    expect(response.content).toContain('Mock Orion response: Oi');
+    expect(response.assistantText).toContain('Mock Orion response: Oi');
   });
   it('selects canonical memories by priority, recency and whole-record budget', () => {
     const date = new Date('2026-09-22T10:00:00Z');

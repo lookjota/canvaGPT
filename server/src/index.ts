@@ -9,7 +9,7 @@ import { hashPassword, requireAuth, requireProjectMember, setSession, verifyPass
 import { assertContextLimits, buildConversationContext, buildProjectMemoryContext } from './contextBuilder.js';
 import { createAiProvider, MockAiProvider, type AiProvider } from './aiProvider.js';
 import { projectMemoryCreateInput, projectMemoryKind, projectMemoryUpdateInput } from './projectMemory.js';
-import { hasExplicitVisualCreationRequest, isConfirmationOrProposalFollowUp, parseStoredVisualProposal, validateProviderVisualResponse } from './visualProposal.js';
+import { hasExplicitVisualCreationRequest, isConfirmationOrProposalFollowUp, parseStoredVisualProposal, validateProviderVisualResponseWithDiagnostics } from './visualProposal.js';
 
 export function createApp(options: { aiProvider?: AiProvider } = {}) {
 const app = express();
@@ -155,7 +155,8 @@ app.post('/api/projects/:projectId/conversations/:conversationId/messages', requ
   try {
     const result = await (options.aiProvider ?? createAiProvider()).generate({ message: input.content, history, context: fullContext });
     const explicitVisualRequest = hasExplicitVisualCreationRequest(input.content);
-    const visual = validateProviderVisualResponse(result.content, explicitVisualRequest ? result.proposedActions : undefined);
+    const visual = validateProviderVisualResponseWithDiagnostics(result.assistantText, explicitVisualRequest ? result.proposedActions : undefined);
+    console.info('AI visual response inspected', { provider: env.AI_PROVIDER, stage: visual.diagnostics.stage, actionCount: visual.diagnostics.actionCount, ...(visual.diagnostics.issues ? { issues: visual.diagnostics.issues } : {}) });
     if (!explicitVisualRequest && isConfirmationOrProposalFollowUp(input.content)) {
       visual.assistantText = 'A proposta permanece aguardando revisão. A aplicação ao canvas ainda não está disponível.';
     }

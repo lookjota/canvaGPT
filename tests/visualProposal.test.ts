@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import { MAX_ACTION_CONTENT_LENGTH, MAX_PROPOSED_ACTIONS, createNodeAction, hasExplicitVisualCreationRequest, providerVisualResponse, validateProviderVisualResponse, visualProposalPayload } from '../server/src/visualProposal.js';
-import { MockAiProvider } from '../server/src/aiProvider.js';
+import { MAX_ACTION_CONTENT_LENGTH, MAX_PROPOSED_ACTIONS, createNodeAction, hasExplicitVisualCreationRequest, normalizeProviderVisualResponse, providerVisualResponse, validateProviderVisualResponse, visualProposalPayload } from '../server/src/visualProposal.js';
+import { MockAiProvider, OpenAiProvider } from '../server/src/aiProvider.js';
 
 const action = { type: 'CREATE_NODE', clientActionId: 'action-1', nodeType: 'TASK', title: 'Produzir capa', content: 'Criar a capa oficial' } as const;
 
@@ -14,13 +14,13 @@ describe('visual action protocol', () => {
     }
     const mock = new MockAiProvider();
     expect((await mock.generate({ message: 'Crie três blocos no canvas', history: [], context: '' })).proposedActions).toHaveLength(3);
-    expect((await mock.generate({ message: 'ok, aprovado', history: [], context: '' })).proposedActions).toBeUndefined();
+    expect((await mock.generate({ message: 'ok, aprovado', history: [], context: '' })).proposedActions).toEqual([]);
   });
   it('builds the exact three semantic actions for the manual plan request', async () => {
     const message = 'Crie um plano visual com três blocos: uma decisão sobre a estratégia de lançamento e duas tarefas para produzir a página de vendas e configurar os anúncios.';
     expect(hasExplicitVisualCreationRequest(message)).toBe(true);
     const result = await new MockAiProvider().generate({ message, history: [{ role: 'assistant', content: 'Proposta visual anterior.' }], context: '' });
-    expect(result.content).toContain('proposta visual');
+    expect(result.assistantText).toContain('proposta visual');
     expect(result.proposedActions).toMatchObject([
       { nodeType: 'DECISION', title: 'Estratégia de lançamento', content: 'Decidir a estratégia de lançamento.' },
       { nodeType: 'TASK', title: 'Produzir a página de vendas', content: 'Produzir a página de vendas.' },
@@ -31,7 +31,7 @@ describe('visual action protocol', () => {
     const mock = new MockAiProvider();
     for (const message of ['?', 'resposta parou no meio?', 'ok', 'ok, aprovado', 'obrigado']) {
       expect(hasExplicitVisualCreationRequest(message)).toBe(false);
-      expect((await mock.generate({ message, history: [{ role: 'assistant', content: 'Preparei uma proposta visual.' }], context: '' })).proposedActions).toBeUndefined();
+      expect((await mock.generate({ message, history: [{ role: 'assistant', content: 'Preparei uma proposta visual.' }], context: '' })).proposedActions).toEqual([]);
     }
   });
   it('accepts text without actions and valid one/multiple CREATE_NODE actions', () => {
@@ -64,5 +64,30 @@ describe('visual action protocol', () => {
   });
   it('never claims a proposal exists when provider actions are invalid', () => {
     expect(validateProviderVisualResponse('A proposta foi criada abaixo.', [{ ...action, clientActionId: 'bad id' }])).toEqual({ payload: null, assistantText: 'Entendi o pedido, mas não foi possível gerar uma proposta visual válida.' });
+  });
+  it('normalizes a structured provider response and generates a stable id when omitted', () => {
+    const first = normalizeProviderVisualResponse({ assistantText: 'Preparei.', proposedActions: [{ type: 'CREATE_NODE', nodeType: 'TASK', title: 'Tarefa', content: 'Conteúdo' }] });
+    const second = normalizeProviderVisualResponse({ assistantText: 'Preparei.', proposedActions: [{ type: 'CREATE_NODE', nodeType: 'TASK', title: 'Tarefa', content: 'Conteúdo' }] });
+    expect(first.result.proposedActions[0].clientActionId).toMatch(/^provider-action-/);
+    expect(first.result).toEqual(second.result);
+  });
+  it('accepts the provider official serialized JSON format through the OpenAI adapter', async () => {
+    let request: any;
+    const client = { responses: { create: async (input: any) => { request = input; return { output_text: JSON.stringify({ assistantText: 'Preparei.', proposedActions: [{ type: 'CREATE_NODE', clientActionId: null, nodeType: 'DECISION', title: 'Decidir', content: 'Escolher' }] }) }; } } };
+    const result = await new OpenAiProvider(client as never).generate({ message: 'Crie um bloco no canvas', history: [], context: '' });
+    expect(result.assistantText).toBe('Preparei.');
+    expect(result.proposedActions[0].nodeType).toBe('DECISION');
+    expect(result.proposedActions[0].clientActionId).toMatch(/^provider-action-/);
+    expect(request.text.format).toMatchObject({ type: 'json_schema', name: 'visual_proposal_response', strict: true });
+  });
+  it('rejects a missing field safely without partially accepting actions', () => {
+    const result = normalizeProviderVisualResponse({ assistantText: 'Preparei.' });
+    expect(result.result.proposedActions).toEqual([]);
+    expect(result.diagnostics.stage).toBe('normalized');
+  });
+  it('rejects malformed serialized output without exposing it as assistant text', async () => {
+    const client = { responses: { create: async () => ({ output_text: '```json\n{not-json}\n```' }) } };
+    const result = await new OpenAiProvider(client as never).generate({ message: 'Crie um bloco no canvas', history: [], context: '' });
+    expect(result).toEqual({ assistantText: 'Não foi possível gerar uma resposta estruturada.', proposedActions: [] });
   });
 });

@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { z } from 'zod';
 
 export const VISUAL_PROTOCOL_VERSION = '1.0';
@@ -39,8 +40,56 @@ export const providerVisualResponse = z.object({
   }
 });
 
+// Provider adapters may receive an action without an id. The adapter owns id
+// generation; the backend only accepts the canonical schema below.
+const providerActionWithoutId = z.object({
+  type: z.literal('CREATE_NODE'),
+  clientActionId: z.string().trim().min(1).max(MAX_ACTION_ID_LENGTH).regex(/^[A-Za-z0-9][A-Za-z0-9._:-]*$/).nullable(),
+  nodeType: proposedNodeType,
+  title: createNodeAction.shape.title,
+  content: createNodeAction.shape.content,
+}).strict();
+
+export const rawProviderVisualResponse = z.object({
+  assistantText: z.string().trim().min(1).max(MAX_ASSISTANT_TEXT_LENGTH),
+  proposedActions: z.array(providerActionWithoutId).max(MAX_PROPOSED_ACTIONS),
+}).strict();
+const providerVisualResponseJsonSchema = z.toJSONSchema(rawProviderVisualResponse) as Record<string, unknown>;
+delete providerVisualResponseJsonSchema.$schema;
+export { providerVisualResponseJsonSchema };
+
 export type VisualProposalPayload = z.infer<typeof visualProposalPayload>;
 export type ProposedAction = z.infer<typeof createNodeAction>;
+export type ProviderDiagnostics = { stage: string; actionCount: number; issues?: Array<{ code: string; path: string }> };
+
+export function normalizeProviderVisualResponse(raw: unknown): { result: { assistantText: string; proposedActions: ProposedAction[] }; diagnostics: ProviderDiagnostics } {
+  const normalizedRaw = raw && typeof raw === 'object' ? {
+    ...(raw as Record<string, unknown>),
+    proposedActions: Array.isArray((raw as { proposedActions?: unknown }).proposedActions)
+      ? ((raw as { proposedActions: unknown[] }).proposedActions).map(action => action && typeof action === 'object' && !Object.hasOwn(action, 'clientActionId') ? { ...(action as Record<string, unknown>), clientActionId: null } : action)
+      : ((raw as { proposedActions?: unknown }).proposedActions ?? []),
+  } : raw;
+  const parsed = rawProviderVisualResponse.safeParse(normalizedRaw);
+  if (!parsed.success) return {
+    result: { assistantText: 'Não foi possível gerar uma resposta estruturada.', proposedActions: [] },
+    diagnostics: {
+      stage: 'provider-schema-validation',
+      actionCount: Array.isArray((raw as { proposedActions?: unknown } | null)?.proposedActions) ? ((raw as { proposedActions: unknown[] }).proposedActions.length) : 0,
+      issues: parsed.error.issues.map(issue => ({ code: issue.code, path: issue.path.join('.') })),
+    },
+  };
+  const proposedActions = parsed.data.proposedActions.map((action, index) => {
+    const { clientActionId, ...withoutId } = action;
+    return { ...withoutId, clientActionId: clientActionId ?? createProviderActionId(action, index) };
+  });
+  return { result: { assistantText: parsed.data.assistantText, proposedActions }, diagnostics: { stage: 'normalized', actionCount: proposedActions.length } };
+}
+
+function createProviderActionId(action: Omit<ProposedAction, 'clientActionId'> & { clientActionId?: string | null }, index: number): string {
+  const seed = `${index}|${action.type}|${action.nodeType}|${action.title}|${action.content}`;
+  const hash = createHash('sha256').update(seed).digest('hex').slice(0, 24);
+  return `provider-action-${hash}-${index + 1}`;
+}
 
 const visualCreationVerbs = /\b(?:crie|criar|cria|adicione|adicionar|monte|montar|gere|gerar|produza|produzir|organize|organizar|estruture|estruturar|decomponha|decompor|distribua|distribuir|proponha|propor)\b/i;
 const visualTargets = /\b(?:canvas|blocos?|nodes?|elementos?|cart(?:õ|o)es?|tarefas?|decis(?:ão|oes)|plano\s+visual|proposta\s+visual|estrutura\s+visual)\b/i;
@@ -64,11 +113,16 @@ export function isConfirmationOrProposalFollowUp(message: string): boolean {
 }
 
 export function validateProviderVisualResponse(content: string, proposedActions: unknown): { payload: VisualProposalPayload | null; assistantText: string } {
+  const result = validateProviderVisualResponseWithDiagnostics(content, proposedActions);
+  return { payload: result.payload, assistantText: result.assistantText };
+}
+
+export function validateProviderVisualResponseWithDiagnostics(content: string, proposedActions: unknown): { payload: VisualProposalPayload | null; assistantText: string; diagnostics: ProviderDiagnostics } {
   const assistantText = content.trim().slice(0, MAX_ASSISTANT_TEXT_LENGTH);
   const parsed = providerVisualResponse.safeParse({ assistantText, proposedActions: proposedActions ?? [] });
-  if (!parsed.success) return { payload: null, assistantText: proposalFailureText(assistantText) };
-  if (parsed.data.proposedActions.length === 0) return { payload: null, assistantText: proposalFailureText(parsed.data.assistantText) };
-  return { payload: { protocolVersion: VISUAL_PROTOCOL_VERSION, ...parsed.data }, assistantText: parsed.data.assistantText };
+  if (!parsed.success) return { payload: null, assistantText: proposalFailureText(assistantText), diagnostics: { stage: 'backend-schema-validation', actionCount: Array.isArray(proposedActions) ? proposedActions.length : 0, issues: parsed.error.issues.map(issue => ({ code: issue.code, path: issue.path.join('.') })) } };
+  if (parsed.data.proposedActions.length === 0) return { payload: null, assistantText: proposalFailureText(parsed.data.assistantText), diagnostics: { stage: 'empty-proposal', actionCount: 0 } };
+  return { payload: { protocolVersion: VISUAL_PROTOCOL_VERSION, ...parsed.data }, assistantText: parsed.data.assistantText, diagnostics: { stage: 'validated', actionCount: parsed.data.proposedActions.length } };
 }
 
 function proposalFailureText(assistantText: string): string {
