@@ -16,6 +16,24 @@ describe('visual action protocol', () => {
     expect((await mock.generate({ message: 'Crie três blocos no canvas', history: [], context: '' })).proposedActions).toHaveLength(3);
     expect((await mock.generate({ message: 'ok, aprovado', history: [], context: '' })).proposedActions).toBeUndefined();
   });
+  it('builds the exact three semantic actions for the manual plan request', async () => {
+    const message = 'Crie um plano visual com três blocos: uma decisão sobre a estratégia de lançamento e duas tarefas para produzir a página de vendas e configurar os anúncios.';
+    expect(hasExplicitVisualCreationRequest(message)).toBe(true);
+    const result = await new MockAiProvider().generate({ message, history: [{ role: 'assistant', content: 'Proposta visual anterior.' }], context: '' });
+    expect(result.content).toContain('proposta visual');
+    expect(result.proposedActions).toMatchObject([
+      { nodeType: 'DECISION', title: 'Estratégia de lançamento', content: 'Decidir a estratégia de lançamento.' },
+      { nodeType: 'TASK', title: 'Produzir a página de vendas', content: 'Produzir a página de vendas.' },
+      { nodeType: 'TASK', title: 'Configurar os anúncios', content: 'Configurar os anúncios.' },
+    ]);
+  });
+  it('does not infer visual intent from follow-ups or prior history', async () => {
+    const mock = new MockAiProvider();
+    for (const message of ['?', 'resposta parou no meio?', 'ok', 'ok, aprovado', 'obrigado']) {
+      expect(hasExplicitVisualCreationRequest(message)).toBe(false);
+      expect((await mock.generate({ message, history: [{ role: 'assistant', content: 'Preparei uma proposta visual.' }], context: '' })).proposedActions).toBeUndefined();
+    }
+  });
   it('accepts text without actions and valid one/multiple CREATE_NODE actions', () => {
     expect(validateProviderVisualResponse('Resposta normal', undefined).payload).toBeNull();
     expect(providerVisualResponse.parse({ assistantText: 'Preparei.', proposedActions: [action] }).proposedActions).toHaveLength(1);
@@ -43,5 +61,8 @@ describe('visual action protocol', () => {
   it('rejects malformed provider output without partially accepting a proposal', () => {
     expect(validateProviderVisualResponse('Texto seguro', '{not-json')).toMatchObject({ payload: null, assistantText: 'Texto seguro' });
     expect(() => visualProposalPayload.parse({ protocolVersion: '1.0', assistantText: 'x', proposedActions: [{ ...action, projectId: 'nope' }] })).toThrow();
+  });
+  it('never claims a proposal exists when provider actions are invalid', () => {
+    expect(validateProviderVisualResponse('A proposta foi criada abaixo.', [{ ...action, clientActionId: 'bad id' }])).toEqual({ payload: null, assistantText: 'Entendi o pedido, mas não foi possível gerar uma proposta visual válida.' });
   });
 });

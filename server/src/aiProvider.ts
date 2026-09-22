@@ -13,6 +13,16 @@ export class MockAiProvider implements AiProvider {
     MockAiProvider.lastInput = input;
     const content = `Mock Orion response: ${input.message}${input.context ? `\nContext received (${input.context.length} characters).` : ''}`;
     if (!hasExplicitVisualCreationRequest(input.message)) return { content };
+    const normalizedMessage = input.message.normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase();
+    const manualPlan = /\bplano\s+visual\b/.test(normalizedMessage) && /\b(?:3|tres)\s+blocos?\b/.test(normalizedMessage) && /\bdecis(?:ao|oes)\b/.test(normalizedMessage) && /\bduas?\s+tarefas?\b/.test(normalizedMessage);
+    if (manualPlan) return {
+      content: 'Preparei uma proposta visual aguardando revisão.',
+      proposedActions: [
+        { type: 'CREATE_NODE', clientActionId: 'mock-decision-launch-strategy', nodeType: 'DECISION', title: 'Estratégia de lançamento', content: 'Decidir a estratégia de lançamento.' },
+        { type: 'CREATE_NODE', clientActionId: 'mock-task-sales-page', nodeType: 'TASK', title: 'Produzir a página de vendas', content: 'Produzir a página de vendas.' },
+        { type: 'CREATE_NODE', clientActionId: 'mock-task-ads', nodeType: 'TASK', title: 'Configurar os anúncios', content: 'Configurar os anúncios.' },
+      ],
+    };
     const count = /\b(?:3|tr[eê]s)\b/i.test(input.message) ? 3 : 1;
     return {
       content: 'Preparei uma proposta visual aguardando revisão.',

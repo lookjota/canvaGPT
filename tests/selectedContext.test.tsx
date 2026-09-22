@@ -45,4 +45,23 @@ describe('selected context', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Enviar' }));
     await vi.waitFor(() => expect(sendMessage).toHaveBeenCalledWith('project', 'conversation', { content: 'Qual é o produto?', contextNodeIds: ['a', 'b'] }));
   });
+
+  it('renders a proposal from the send response immediately and after reload', async () => {
+    const proposal = { id: 'proposal', projectId: 'project', conversationId: 'conversation', assistantMessageId: 'assistant', status: 'PROPOSED' as const, protocolVersion: '1.0', createdAt: '', payload: { protocolVersion: '1.0', assistantText: 'Preparei uma proposta visual aguardando revisão.', proposedActions: [{ type: 'CREATE_NODE' as const, clientActionId: 'decision', nodeType: 'DECISION' as const, title: 'Estratégia de lançamento', content: 'Decidir a estratégia.' }, { type: 'CREATE_NODE' as const, clientActionId: 'task-1', nodeType: 'TASK' as const, title: 'Produzir a página de vendas', content: 'Produzir a página.' }, { type: 'CREATE_NODE' as const, clientActionId: 'task-2', nodeType: 'TASK' as const, title: 'Configurar os anúncios', content: 'Configurar anúncios.' }] } };
+    vi.spyOn(api, 'conversations').mockResolvedValue({ conversations: [] });
+    vi.spyOn(api, 'createConversation').mockResolvedValue({ conversation: { id: 'conversation' } as never });
+    vi.spyOn(api, 'sendMessage').mockResolvedValue({ userMessage: { id: 'user', role: 'user', content: 'Crie um plano visual', contextNodeIds: [], createdAt: '' }, assistantMessage: { id: 'assistant', role: 'assistant', content: proposal.payload.assistantText, contextNodeIds: [], createdAt: '', visualProposal: proposal } });
+    render(<AiPanel projectId="project" nodes={nodes} selectedIds={new Set()} contextIds={[]} onContextChange={vi.fn()} />);
+    fireEvent.change(screen.getByPlaceholderText('Digite uma mensagem…'), { target: { value: 'Crie um plano visual' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Enviar' }));
+    await vi.waitFor(() => expect(screen.getByText('Proposta visual')).toBeTruthy());
+    expect(screen.getByText('DECISION — Estratégia de lançamento')).toBeTruthy();
+    expect(screen.getByText('Status: aguardando revisão')).toBeTruthy();
+    expect(screen.getByText('Esta proposta ainda não altera o canvas.')).toBeTruthy();
+
+    vi.spyOn(api, 'conversations').mockResolvedValue({ conversations: [{ id: 'conversation', projectId: 'project', userId: 'user', createdAt: '', updatedAt: '' }] });
+    vi.spyOn(api, 'conversation').mockResolvedValue({ conversation: { id: 'conversation', messages: [{ id: 'assistant', role: 'assistant', content: proposal.payload.assistantText, contextNodeIds: [], createdAt: '', visualProposal: proposal }] } as never });
+    const reloaded = render(<AiPanel projectId="project" nodes={nodes} selectedIds={new Set()} contextIds={[]} onContextChange={vi.fn()} />);
+    await vi.waitFor(() => expect(reloaded.getByText(/Configurar os anúncios/)).toBeTruthy());
+  });
 });
