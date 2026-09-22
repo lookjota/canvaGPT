@@ -3,6 +3,7 @@ import express from 'express';
 import cors from 'cors';
 import cookieParser from 'cookie-parser';
 import { z } from 'zod';
+import type { Prisma } from '@prisma/client';
 import { db } from './db.js';
 import { env } from './env.js';
 import { hashPassword, requireAuth, requireProjectMember, setSession, verifyPassword } from './auth.js';
@@ -134,6 +135,94 @@ app.get('/api/projects/:projectId/visual-proposals/:proposalId', requireAuth, as
   const proposal = await db.visualProposal.findFirst({ where: { id: id.parse(req.params.proposalId), projectId } });
   if (!proposal) return res.status(404).json({ error: 'NOT_FOUND' });
   res.json({ proposal: safeProposal(proposal) });
+}));
+
+const applyProposalInput = z.object({
+  anchor: z.object({ x: z.number().finite(), y: z.number().finite() }).strict().optional(),
+}).strict().default({});
+const visualNodeTypeMap = { NOTE: 'note', TASK: 'task', DECISION: 'decision', DOCUMENT: 'document', PROMPT: 'prompt', FILE: 'file' } as const;
+const defaultNodeSize = { width: 240, height: 160 };
+const SAFE_COORDINATE_LIMIT = 100_000;
+const GRID_GAP_X = 40;
+const GRID_GAP_Y = 40;
+const GRID_COLUMNS = 4;
+
+function safeCoordinate(value: number, fallback: number) {
+  return Number.isFinite(value) ? Math.max(-SAFE_COORDINATE_LIMIT, Math.min(SAFE_COORDINATE_LIMIT, value)) : fallback;
+}
+
+function proposalLayout(existing: Array<{ positionX: number; positionY: number; width: number; height: number }>, count: number, anchor?: { x: number; y: number }) {
+  if (count === 0) return [] as Array<{ positionX: number; positionY: number }>;
+  const right = existing.reduce((max, node) => Math.max(max, safeCoordinate(node.positionX, 120) + Math.max(0, node.width)), 120);
+  const bottom = existing.reduce((max, node) => Math.max(max, safeCoordinate(node.positionY, 120) + Math.max(0, node.height)), 120);
+  const startX = safeCoordinate(anchor?.x ?? (existing.length ? right + 80 : 120), 120);
+  const startY = safeCoordinate(anchor?.y ?? (existing.length ? Math.max(120, bottom - 160) : 120), 120);
+  return Array.from({ length: count }, (_, index) => ({
+    positionX: safeCoordinate(startX + (index % GRID_COLUMNS) * (defaultNodeSize.width + GRID_GAP_X), 120),
+    positionY: safeCoordinate(startY + Math.floor(index / GRID_COLUMNS) * (defaultNodeSize.height + GRID_GAP_Y), 120),
+  }));
+}
+
+async function loadAppliedProposal(tx: Prisma.TransactionClient, proposalId: string) {
+  return tx.visualProposal.findUniqueOrThrow({ where: { id: proposalId }, include: { actions: { orderBy: { createdAt: 'asc' }, include: { node: true } } } });
+}
+
+app.post('/api/projects/:projectId/visual-proposals/:proposalId/apply', requireAuth, asyncRoute(async (req, res) => {
+  const projectId = id.parse(req.params.projectId); const proposalId = id.parse(req.params.proposalId);
+  if (!(await requireProjectMember(projectId, req.userId!, true))) return res.status(404).json({ error: 'NOT_FOUND' });
+  const input = applyProposalInput.parse(req.body ?? {});
+  let result;
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    try {
+      result = await db.$transaction(async tx => {
+        const proposal = await tx.visualProposal.findFirst({ where: { id: proposalId, projectId } });
+        if (!proposal) return null;
+        if (proposal.status === 'APPLIED') return loadAppliedProposal(tx, proposalId);
+        if (proposal.status === 'REJECTED') throw Object.assign(new Error('PROPOSAL_NOT_PENDING'), { code: 'PROPOSAL_NOT_PENDING' });
+        let payload;
+        try { payload = parseStoredVisualProposal(proposal.payload); } catch { throw Object.assign(new Error('PROPOSAL_INVALID'), { code: 'PROPOSAL_INVALID' }); }
+        const claimed = await tx.visualProposal.updateMany({ where: { id: proposalId, projectId, status: 'PENDING' }, data: { status: 'APPLIED', appliedAt: new Date(), appliedByProfileId: req.userId! } });
+        if (!claimed.count) return loadAppliedProposal(tx, proposalId);
+        const existing = await tx.canvasNode.findMany({ where: { projectId }, select: { positionX: true, positionY: true, width: true, height: true } });
+        const positions = proposalLayout(existing, payload.proposedActions.length, input.anchor);
+        const nodes = [];
+        for (const [index, action] of payload.proposedActions.entries()) {
+          const position = positions[index];
+          const node = await tx.canvasNode.create({ data: { projectId, createdBy: req.userId!, type: visualNodeTypeMap[action.nodeType], title: action.title, content: action.content, positionX: position.positionX, positionY: position.positionY, width: defaultNodeSize.width, height: defaultNodeSize.height, sourceType: 'visual_proposal', metadata: { proposalId, clientActionId: action.clientActionId, protocolVersion: payload.protocolVersion } } });
+          nodes.push(node);
+          await tx.visualProposalAction.create({ data: { proposalId, clientActionId: action.clientActionId, nodeId: node.id, protocolVersion: payload.protocolVersion } });
+        }
+        const applied = await tx.visualProposal.findUniqueOrThrow({ where: { id: proposalId }, include: { actions: { orderBy: { createdAt: 'asc' }, include: { node: true } } } });
+        return { proposal: applied, nodes };
+      }, { isolationLevel: 'Serializable' });
+      break;
+    } catch (error) {
+      if ((error as { code?: string }).code === 'P2034' && attempt < 2) continue;
+      if ((error as { code?: string }).code === 'PROPOSAL_INVALID') return res.status(409).json({ error: 'PROPOSAL_INVALID' });
+      if ((error as { code?: string }).code === 'PROPOSAL_NOT_PENDING') return res.status(409).json({ error: 'PROPOSAL_NOT_PENDING' });
+      throw error;
+    }
+  }
+  if (!result) return res.status(404).json({ error: 'NOT_FOUND' });
+  const applied = 'proposal' in result ? result : { proposal: result, nodes: result.actions.map(action => action.node) };
+  const proposal = safeProposal(applied.proposal);
+  if (!proposal) return res.status(404).json({ error: 'NOT_FOUND' });
+  res.json({ proposal, nodes: applied.nodes });
+}));
+
+app.post('/api/projects/:projectId/visual-proposals/:proposalId/reject', requireAuth, asyncRoute(async (req, res) => {
+  const projectId = id.parse(req.params.projectId); const proposalId = id.parse(req.params.proposalId);
+  if (!(await requireProjectMember(projectId, req.userId!, true))) return res.status(404).json({ error: 'NOT_FOUND' });
+  const result = await db.$transaction(async tx => {
+    const current = await tx.visualProposal.findFirst({ where: { id: proposalId, projectId } });
+    if (!current) return null;
+    if (current.status === 'REJECTED') return current;
+    if (current.status === 'APPLIED') throw Object.assign(new Error('PROPOSAL_NOT_PENDING'), { code: 'PROPOSAL_NOT_PENDING' });
+    const changed = await tx.visualProposal.updateMany({ where: { id: proposalId, projectId, status: 'PENDING' }, data: { status: 'REJECTED', rejectedAt: new Date(), rejectedByProfileId: req.userId! } });
+    return changed.count ? tx.visualProposal.findUniqueOrThrow({ where: { id: proposalId } }) : tx.visualProposal.findUniqueOrThrow({ where: { id: proposalId } });
+  });
+  if (!result) return res.status(404).json({ error: 'NOT_FOUND' });
+  res.json({ proposal: safeProposal(result) });
 }));
 app.post('/api/projects/:projectId/conversations/:conversationId/messages', requireAuth, asyncRoute(async (req, res) => {
   const projectId = id.parse(req.params.projectId); if (!(await requireProjectMember(projectId, req.userId!))) return res.status(404).json({ error: 'NOT_FOUND' });
