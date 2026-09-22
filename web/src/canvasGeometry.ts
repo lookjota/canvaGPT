@@ -14,6 +14,18 @@ export type Rect = { minX: number; minY: number; maxX: number; maxY: number };
 export type EdgeAnchor = 'top' | 'right' | 'bottom' | 'left';
 export type EdgeCurve = { start: Point; control1: Point; control2: Point; end: Point; midpoint: Point; sourceAnchor: EdgeAnchor; targetAnchor: EdgeAnchor };
 
+export const CONNECTION_SNAP_MARGIN = 18;
+
+export function isEditableTarget(target: EventTarget | null): boolean {
+  let current: any = target;
+  for (let depth = 0; current && depth < 8; depth += 1) {
+    const tagName = typeof current.tagName === 'string' ? current.tagName.toUpperCase() : '';
+    if (tagName === 'INPUT' || tagName === 'TEXTAREA' || tagName === 'SELECT' || current.isContentEditable === true || current.contentEditable === 'true') return true;
+    current = current.parentElement;
+  }
+  return false;
+}
+
 export function clampZoom(zoom: number): number {
   return Math.min(MAX_ZOOM, Math.max(MIN_ZOOM, Number.isFinite(zoom) ? zoom : 1));
 }
@@ -54,6 +66,17 @@ export function rectFromPoints(a: Point, b: Point): Rect {
 
 export function intersectsRect(node: GeometryNode, rect: Rect): boolean {
   return node.positionX < rect.maxX && node.positionX + node.width > rect.minX && node.positionY < rect.maxY && node.positionY + node.height > rect.minY;
+}
+
+export function pointToRectDistance(point: Point, node: GeometryNode): number {
+  const dx = Math.max(node.positionX - point.x, 0, point.x - (node.positionX + node.width));
+  const dy = Math.max(node.positionY - point.y, 0, point.y - (node.positionY + node.height));
+  return Math.hypot(dx, dy);
+}
+
+export function findConnectionTarget<T extends GeometryNode & { id: string }>(nodes: T[], sourceId: string, pointerWorld: Point, margin = CONNECTION_SNAP_MARGIN): T | null {
+  return nodes.filter(node => node.id !== sourceId && pointToRectDistance(pointerWorld, node) <= margin)
+    .sort((a, b) => pointToRectDistance(pointerWorld, a) - pointToRectDistance(pointerWorld, b) || a.id.localeCompare(b.id))[0] ?? null;
 }
 
 export function moveNodes<T extends GeometryNode>(nodes: T[], delta: Point): T[] {
@@ -110,6 +133,17 @@ export function edgeCurve(source: GeometryNode, target: GeometryNode, offset = 0
   const control1 = { x: start.x + sourceDirection.x * distance + perpendicular.x * offset, y: start.y + sourceDirection.y * distance + perpendicular.y * offset };
   const control2 = { x: end.x + targetDirection.x * distance + perpendicular.x * offset, y: end.y + targetDirection.y * distance + perpendicular.y * offset };
   return { start, control1, control2, end, midpoint: cubicBezierPoint(start, control1, control2, end, 0.5), sourceAnchor, targetAnchor };
+}
+
+export function connectionPreviewCurve(source: GeometryNode, pointer: Point): EdgeCurve {
+  const target = { positionX: pointer.x - 0.5, positionY: pointer.y - 0.5, width: 1, height: 1 };
+  const { sourceAnchor } = chooseEdgeAnchors(source, target);
+  const start = anchorPoint(source, sourceAnchor);
+  const distance = Math.min(180, Math.max(48, Math.hypot(pointer.x - start.x, pointer.y - start.y) * 0.35));
+  const direction = anchorDirection(sourceAnchor);
+  const control1 = { x: start.x + direction.x * distance, y: start.y + direction.y * distance };
+  const control2 = { x: pointer.x - direction.x * distance * 0.65, y: pointer.y - direction.y * distance * 0.65 };
+  return { start, control1, control2, end: pointer, midpoint: cubicBezierPoint(start, control1, control2, pointer, 0.5), sourceAnchor, targetAnchor: sourceAnchor };
 }
 
 export function cubicBezierPoint(start: Point, control1: Point, control2: Point, end: Point, t: number): Point {

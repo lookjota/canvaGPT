@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { anchorPoint, boundingBox, chooseEdgeAnchors, clampZoom, constrainNodeSize, cubicBezierPoint, dragDelta, edgeCurve, edgeEndpoints, fitView, intersectsRect, normalizeViewport, panViewport, rectFromPoints, screenToWorld, worldToScreen, zoomAroundPoint } from '../web/src/canvasGeometry';
+import { anchorPoint, boundingBox, chooseEdgeAnchors, clampZoom, connectionPreviewCurve, constrainNodeSize, cubicBezierPoint, dragDelta, edgeCurve, edgeEndpoints, findConnectionTarget, fitView, intersectsRect, isEditableTarget, normalizeViewport, panViewport, pointToRectDistance, rectFromPoints, screenToWorld, worldToScreen, zoomAroundPoint } from '../web/src/canvasGeometry';
 
 describe('canvas geometry', () => {
   it('converts screen and world coordinates in both directions', () => {
@@ -79,5 +79,35 @@ describe('canvas geometry', () => {
     const start = { x: 0, y: 0 }; const control1 = { x: 10, y: 0 }; const control2 = { x: 10, y: 10 }; const end = { x: 0, y: 10 };
     expect(cubicBezierPoint(start, control1, control2, end, 0.5)).toEqual({ x: 7.5, y: 5 });
     expect(edgeEndpoints({ positionX: 0, positionY: 0, width: 100, height: 80 }, { positionX: 200, positionY: 10, width: 100, height: 80 }).start.x).toBe(100);
+  });
+
+  it('finds magnetic targets in world space, excluding the source', () => {
+    const nodes = [{ id: 'source', positionX: 0, positionY: 0, width: 100, height: 80 }, { id: 'near', positionX: 130, positionY: 0, width: 100, height: 80 }, { id: 'far', positionX: 180, positionY: 0, width: 100, height: 80 }];
+    expect(findConnectionTarget(nodes, 'source', { x: 115, y: 40 }, 18)?.id).toBe('near');
+    expect(findConnectionTarget(nodes, 'source', { x: 119, y: 40 }, 10)).toBeNull();
+    expect(findConnectionTarget(nodes, 'source', { x: 40, y: 40 }, 18)).toBeNull();
+    expect(pointToRectDistance({ x: 130, y: 40 }, nodes[1])).toBe(0);
+  });
+
+  it('uses deterministic nearest-candidate selection and preserves preview curves', () => {
+    const nodes = [{ id: 'b', positionX: 100, positionY: 0, width: 100, height: 80 }, { id: 'a', positionX: 100, positionY: 100, width: 100, height: 80 }];
+    expect(findConnectionTarget(nodes, 'source', { x: 100, y: 90 }, 20)?.id).toBe('a');
+    const preview = connectionPreviewCurve({ positionX: 0, positionY: 0, width: 100, height: 80 }, { x: 180, y: 40 });
+    expect(preview.end).toEqual({ x: 180, y: 40 });
+    expect(preview.control1).not.toEqual(preview.start);
+  });
+
+  it('converts magnetic pointer coordinates under zoom and pan', () => {
+    const view = { x: 40, y: 20, zoom: 0.5 };
+    const world = screenToWorld({ x: 115, y: 60 }, view);
+    expect(findConnectionTarget([{ id: 'target', positionX: 130, positionY: 60, width: 100, height: 80 }], 'source', world, 18)?.id).toBe('target');
+  });
+
+  it('ignores delete keys for all textual editing targets', () => {
+    expect(isEditableTarget({ tagName: 'INPUT' } as unknown as EventTarget)).toBe(true);
+    expect(isEditableTarget({ tagName: 'TEXTAREA' } as unknown as EventTarget)).toBe(true);
+    expect(isEditableTarget({ tagName: 'SELECT' } as unknown as EventTarget)).toBe(true);
+    expect(isEditableTarget({ isContentEditable: true } as unknown as EventTarget)).toBe(true);
+    expect(isEditableTarget({ tagName: 'DIV' } as unknown as EventTarget)).toBe(false);
   });
 });
