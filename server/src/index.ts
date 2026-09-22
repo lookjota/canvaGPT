@@ -8,6 +8,7 @@ import { env } from './env.js';
 import { hashPassword, requireAuth, requireProjectMember, setSession, verifyPassword } from './auth.js';
 import { assertContextLimits, buildConversationContext } from './contextBuilder.js';
 import { createAiProvider, MockAiProvider, type AiProvider } from './aiProvider.js';
+import { projectMemoryCreateInput, projectMemoryKind, projectMemoryUpdateInput } from './projectMemory.js';
 
 export function createApp(options: { aiProvider?: AiProvider } = {}) {
 const app = express();
@@ -73,6 +74,48 @@ const relationType = z.enum(['related_to','depends_on','generates','derived_from
 app.post('/api/projects/:projectId/edges', requireAuth, asyncRoute(async (req, res) => { const projectId = id.parse(req.params.projectId); if (!(await requireProjectMember(projectId, req.userId!, true))) return res.status(404).json({ error: 'NOT_FOUND' }); const input = z.object({ sourceNodeId: id, targetNodeId: id, relationType, label: z.string().max(100).nullable().optional() }).parse(req.body); const nodes = await db.canvasNode.findMany({ where: { id: { in: [input.sourceNodeId, input.targetNodeId] }, projectId }, select: { id: true } }); if (nodes.length !== 2 || input.sourceNodeId === input.targetNodeId) return res.status(400).json({ error: 'INVALID_EDGE' }); try { const edge = await db.canvasEdge.create({ data: { ...input, projectId } }); res.status(201).json({ edge }); } catch (error) { if ((error as { code?: string }).code === 'P2002') return res.status(409).json({ error: 'EDGE_EXISTS' }); throw error; } }));
 app.patch('/api/projects/:projectId/edges/:edgeId', requireAuth, asyncRoute(async (req, res) => { const projectId = id.parse(req.params.projectId); if (!(await requireProjectMember(projectId, req.userId!, true))) return res.status(404).json({ error: 'NOT_FOUND' }); const input = z.object({ relationType, label: z.string().max(100).nullable().optional() }).partial().parse(req.body); try { const edge = await db.canvasEdge.updateMany({ where: { id: id.parse(req.params.edgeId), projectId }, data: input }); if (!edge.count) return res.status(404).json({ error: 'NOT_FOUND' }); res.json({ edge: await db.canvasEdge.findUniqueOrThrow({ where: { id: id.parse(req.params.edgeId) } }) }); } catch (error) { if ((error as { code?: string }).code === 'P2002') return res.status(409).json({ error: 'EDGE_EXISTS' }); throw error; } }));
 app.delete('/api/projects/:projectId/edges/:edgeId', requireAuth, asyncRoute(async (req, res) => { const projectId = id.parse(req.params.projectId); if (!(await requireProjectMember(projectId, req.userId!, true))) return res.status(404).json({ error: 'NOT_FOUND' }); const result = await db.canvasEdge.deleteMany({ where: { id: id.parse(req.params.edgeId), projectId } }); if (!result.count) return res.status(404).json({ error: 'NOT_FOUND' }); res.status(204).end(); }));
+
+const memoryInclude = { creator: { select: { id: true, name: true } } } as const;
+app.get('/api/projects/:projectId/memories', requireAuth, asyncRoute(async (req, res) => {
+  const projectId = id.parse(req.params.projectId);
+  if (!(await requireProjectMember(projectId, req.userId!))) return res.status(404).json({ error: 'NOT_FOUND' });
+  const kind = req.query.kind === undefined ? undefined : projectMemoryKind.parse(req.query.kind);
+  const archived = req.query.archived === undefined ? false : z.enum(['true', 'false']).parse(req.query.archived) === 'true';
+  const memories = await db.projectMemory.findMany({ where: { projectId, ...(kind ? { kind } : {}), status: archived ? 'ARCHIVED' : 'ACTIVE' }, orderBy: { updatedAt: 'desc' }, include: memoryInclude });
+  res.json({ memories });
+}));
+app.post('/api/projects/:projectId/memories', requireAuth, asyncRoute(async (req, res) => {
+  const projectId = id.parse(req.params.projectId);
+  if (!(await requireProjectMember(projectId, req.userId!, true))) return res.status(404).json({ error: 'NOT_FOUND' });
+  const input = projectMemoryCreateInput.parse(req.body);
+  const memory = await db.projectMemory.create({ data: { ...input, projectId, createdBy: req.userId! }, include: memoryInclude });
+  res.status(201).json({ memory });
+}));
+app.patch('/api/projects/:projectId/memories/:memoryId', requireAuth, asyncRoute(async (req, res) => {
+  const projectId = id.parse(req.params.projectId);
+  if (!(await requireProjectMember(projectId, req.userId!, true))) return res.status(404).json({ error: 'NOT_FOUND' });
+  const memoryId = id.parse(req.params.memoryId);
+  const input = projectMemoryUpdateInput.parse(req.body);
+  const result = await db.projectMemory.updateMany({ where: { id: memoryId, projectId }, data: input });
+  if (!result.count) return res.status(404).json({ error: 'NOT_FOUND' });
+  res.json({ memory: await db.projectMemory.findUniqueOrThrow({ where: { id: memoryId }, include: memoryInclude }) });
+}));
+app.post('/api/projects/:projectId/memories/:memoryId/archive', requireAuth, asyncRoute(async (req, res) => {
+  const projectId = id.parse(req.params.projectId);
+  if (!(await requireProjectMember(projectId, req.userId!, true))) return res.status(404).json({ error: 'NOT_FOUND' });
+  const memoryId = id.parse(req.params.memoryId);
+  const result = await db.projectMemory.updateMany({ where: { id: memoryId, projectId }, data: { status: 'ARCHIVED', archivedAt: new Date() } });
+  if (!result.count) return res.status(404).json({ error: 'NOT_FOUND' });
+  res.json({ memory: await db.projectMemory.findUniqueOrThrow({ where: { id: memoryId }, include: memoryInclude }) });
+}));
+app.post('/api/projects/:projectId/memories/:memoryId/restore', requireAuth, asyncRoute(async (req, res) => {
+  const projectId = id.parse(req.params.projectId);
+  if (!(await requireProjectMember(projectId, req.userId!, true))) return res.status(404).json({ error: 'NOT_FOUND' });
+  const memoryId = id.parse(req.params.memoryId);
+  const result = await db.projectMemory.updateMany({ where: { id: memoryId, projectId }, data: { status: 'ACTIVE', archivedAt: null } });
+  if (!result.count) return res.status(404).json({ error: 'NOT_FOUND' });
+  res.json({ memory: await db.projectMemory.findUniqueOrThrow({ where: { id: memoryId }, include: memoryInclude }) });
+}));
 
 const conversationFor = (projectId: string, conversationId: string, userId: string) => db.conversation.findFirst({ where: { id: conversationId, projectId, userId } });
 const messageInput = z.object({ content: z.string().trim().min(1).max(8000), contextNodeIds: z.array(id).max(20).default([]) });

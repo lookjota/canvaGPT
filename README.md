@@ -37,6 +37,10 @@ Limites atuais: 8.000 caracteres por mensagem, 20 nodes por request e aproximada
 
 O canvas usa coordenadas de mundo, SVG para setas e debounce de 600 ms para edição/movimento. Consulte `docs/adr-001-canvas-engine.md`.
 
+## Memória canônica por projeto
+
+Memórias canônicas são registros estáveis do projeto, distintos do contexto fixado: o contexto fixado é uma seleção explícita de nodes enviada a uma conversa, enquanto a memória canônica é um registro persistente e classificável. Os tipos são `FACT` (fato), `DECISION` (decisão), `HYPOTHESIS` (hipótese), `GAP` (lacuna) e `LEARNING` (aprendizado); uma hipótese só muda de tipo por edição explícita. Toda memória preserva `sourceType`, `sourceRef` opcional e o usuário criador. Memórias são arquivadas/restauradas, nunca excluídas por estas rotas, e sempre são lidas dentro do projeto da rota.
+
 ## Limitações conhecidas desta etapa
 
 Reset de senha, upload real, marquee/pan por gesto, undo/redo e colaboração realtime ainda não estão implementados. A conexão por handles está preparada visualmente, mas a conclusão de uma edge e a edição semântica precisam ser fechadas antes do gate final 2B. Não declarar o núcleo completo até executar o roteiro manual e testes de isolamento com PostgreSQL.

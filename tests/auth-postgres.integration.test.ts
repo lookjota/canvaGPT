@@ -31,6 +31,7 @@ describe('auth and PostgreSQL persistence', () => {
   let cookieA: string;
   let cookieB: string;
   let projectId: string;
+  let projectBId: string;
   let nodeId: string;
   let secondNodeId: string;
 
@@ -43,6 +44,7 @@ describe('auth and PostgreSQL persistence', () => {
 
   afterAll(async () => {
     if (projectId) await db.project.delete({ where: { id: projectId } }).catch(() => undefined);
+    if (projectBId) await db.project.delete({ where: { id: projectBId } }).catch(() => undefined);
     await db.profile.deleteMany({ where: { email: { in: [emailA, emailB] } } }).catch(() => undefined);
     await new Promise<void>(resolve => server?.close(() => resolve()));
     await db.$disconnect();
@@ -191,5 +193,42 @@ describe('auth and PostgreSQL persistence', () => {
     expect((await request(`/api/projects/${projectId}/conversations/${conversationId}`, {}, cookieB)).response.status).toBe(404);
     const invalidNode = await request(`/api/projects/${projectId}/conversations/${conversationId}/messages`, { method: 'POST', body: JSON.stringify({ content: 'invalid', contextNodeIds: ['11111111-1111-4111-8111-111111111111'] }) }, cookieA);
     expect(invalidNode.response.status).toBe(400);
+  });
+
+  it('persists canonical memories with project isolation, provenance and archive lifecycle', async () => {
+    const kinds = ['FACT', 'DECISION', 'HYPOTHESIS', 'GAP', 'LEARNING'] as const;
+    const createdIds: string[] = [];
+    for (const [index, kind] of kinds.entries()) {
+      const created = await request(`/api/projects/${projectId}/memories`, { method: 'POST', body: JSON.stringify({ kind, title: `Memory ${kind}`, content: `Canonical content ${kind}`, confidence: index / 4, sourceType: 'USER', sourceRef: `test:${kind}` }) }, cookieA);
+      expect(created.response.status).toBe(201);
+      const memory = (created.json as { memory: { id: string; kind: string; sourceType: string; sourceRef: string } }).memory;
+      expect(memory).toMatchObject({ kind, sourceType: 'USER', sourceRef: `test:${kind}` });
+      createdIds.push(memory.id);
+    }
+    expect((await request(`/api/projects/${projectId}/memories?kind=HYPOTHESIS`, {}, cookieA)).json).toMatchObject({ memories: [expect.objectContaining({ kind: 'HYPOTHESIS' })] });
+    expect((await request(`/api/projects/${projectId}/memories`, {}, cookieA)).json).toMatchObject({ memories: expect.arrayContaining([expect.objectContaining({ kind: 'HYPOTHESIS' })]) });
+    expect((await request(`/api/projects/${projectId}/memories?kind=NOT_A_KIND`, {}, cookieA)).response.status).toBe(400);
+    expect((await request(`/api/projects/${projectId}/memories`, { method: 'POST', body: JSON.stringify({ kind: 'FACT', content: ' ', sourceType: 'USER' }) }, cookieA)).response.status).toBe(400);
+    expect((await request(`/api/projects/${projectId}/memories`, { method: 'POST', body: JSON.stringify({ kind: 'FACT', content: 'invalid confidence', confidence: 2, sourceType: 'USER' }) }, cookieA)).response.status).toBe(400);
+
+    const hypothesisId = createdIds[2];
+    const edited = await request(`/api/projects/${projectId}/memories/${hypothesisId}`, { method: 'PATCH', body: JSON.stringify({ content: 'Updated hypothesis', title: 'Explicitly revised hypothesis', confidence: 0.75, sourceType: 'CONVERSATION', sourceRef: 'conversation:test' }) }, cookieA);
+    expect(edited.response.status).toBe(200);
+    expect(edited.json).toMatchObject({ memory: { kind: 'HYPOTHESIS', content: 'Updated hypothesis', sourceType: 'CONVERSATION', sourceRef: 'conversation:test' } });
+
+    const archived = await request(`/api/projects/${projectId}/memories/${createdIds[0]}/archive`, { method: 'POST' }, cookieA);
+    expect(archived.response.status).toBe(200);
+    expect(archived.json).toMatchObject({ memory: { status: 'ARCHIVED' } });
+    expect((await request(`/api/projects/${projectId}/memories`, {}, cookieA)).json).not.toMatchObject({ memories: expect.arrayContaining([expect.objectContaining({ id: createdIds[0] })]) });
+    expect((await request(`/api/projects/${projectId}/memories?archived=true`, {}, cookieA)).json).toMatchObject({ memories: [expect.objectContaining({ id: createdIds[0], status: 'ARCHIVED' })] });
+    expect((await request(`/api/projects/${projectId}/memories/${createdIds[0]}/restore`, { method: 'POST' }, cookieA)).json).toMatchObject({ memory: { status: 'ACTIVE', archivedAt: null } });
+
+    const projectB = await request('/api/projects', { method: 'POST', body: JSON.stringify({ name: 'Project B' }) }, cookieB);
+    expect(projectB.response.status).toBe(201);
+    projectBId = (projectB.json as { project: { id: string } }).project.id;
+    const memoryB = await request(`/api/projects/${projectBId}/memories`, { method: 'POST', body: JSON.stringify({ kind: 'FACT', content: 'Private B memory', sourceType: 'USER' }) }, cookieB);
+    expect(memoryB.response.status).toBe(201);
+    expect((await request(`/api/projects/${projectBId}/memories`, {}, cookieA)).response.status).toBe(404);
+    expect((await request(`/api/projects/${projectBId}/memories/${createdIds[0]}`, { method: 'PATCH', body: JSON.stringify({ content: 'cross-project mutation' }) }, cookieA)).response.status).toBe(404);
   });
 });
