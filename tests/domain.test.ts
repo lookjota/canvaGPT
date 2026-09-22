@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { boundingBox, clampZoom, constrainNodeSize, dragDelta, fitView, normalizeViewport, screenToWorld, worldToScreen, zoomAroundPoint } from '../web/src/canvasGeometry';
+import { boundingBox, clampZoom, constrainNodeSize, dragDelta, edgeEndpoints, fitView, intersectsRect, normalizeViewport, rectFromPoints, screenToWorld, worldToScreen, zoomAroundPoint } from '../web/src/canvasGeometry';
 
 describe('canvas geometry', () => {
   it('converts screen and world coordinates in both directions', () => {
@@ -42,5 +42,18 @@ describe('canvas geometry', () => {
 
   it('returns the initial viewport when there are no nodes', () => {
     expect(fitView([], { width: 600, height: 400 })).toEqual({ x: 0, y: 0, zoom: 1 });
+  });
+
+  it('selects nodes intersecting a world-space marquee', () => {
+    const bounds = rectFromPoints({ x: 90, y: 90 }, { x: 250, y: 210 });
+    expect(intersectsRect({ positionX: 100, positionY: 100, width: 80, height: 80 }, bounds)).toBe(true);
+    expect(intersectsRect({ positionX: 300, positionY: 100, width: 80, height: 80 }, bounds)).toBe(false);
+  });
+
+  it('anchors edges on the nearest node borders', () => {
+    const { start, end } = edgeEndpoints({ positionX: 0, positionY: 0, width: 100, height: 80 }, { positionX: 200, positionY: 10, width: 100, height: 80 });
+    expect(start.x).toBe(100);
+    expect(end.x).toBe(200);
+    expect(start.y).toBeGreaterThan(0);
   });
 });

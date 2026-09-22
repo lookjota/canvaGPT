@@ -32,6 +32,7 @@ describe('auth and PostgreSQL persistence', () => {
   let cookieB: string;
   let projectId: string;
   let nodeId: string;
+  let secondNodeId: string;
 
   beforeAll(async () => {
     await db.$connect();
@@ -101,6 +102,9 @@ describe('auth and PostgreSQL persistence', () => {
     const createdNode = await request(`/api/projects/${projectId}/nodes`, { method: 'POST', body: JSON.stringify({ type: 'note', title: 'Node A', content: 'Content A', positionX: 10, positionY: 20, width: 300, height: 180 }) }, cookieA);
     expect(createdNode.response.status).toBe(201);
     nodeId = (createdNode.json as { node: { id: string } }).node.id;
+    const createdSecondNode = await request(`/api/projects/${projectId}/nodes`, { method: 'POST', body: JSON.stringify({ type: 'task', title: 'Node B' }) }, cookieA);
+    expect(createdSecondNode.response.status).toBe(201);
+    secondNodeId = (createdSecondNode.json as { node: { id: string } }).node.id;
 
     const stressNodes: Array<{ type: 'note' | 'task' | 'decision'; title: string }> = [
       { type: 'note', title: 'Note 1' }, { type: 'note', title: 'Note 2' }, { type: 'note', title: 'Note 3' },
@@ -150,5 +154,21 @@ describe('auth and PostgreSQL persistence', () => {
     expect((stillOwned.json as { project: { name: string; nodes: Array<{ title: string }> }; viewState: { viewportX: number; viewportY: number; zoom: number } }).project).toMatchObject({ name: 'Project A' });
     expect((stillOwned.json as { project: { nodes: Array<{ title: string }> } }).project.nodes[0].title).toBe('Node A');
     expect((stillOwned.json as { viewState: { viewportX: number; viewportY: number; zoom: number } }).viewState).toMatchObject({ viewportX: 42, viewportY: -18, zoom: 1.25 });
+  });
+
+  it('persists semantic edges, rejects duplicates and protects project boundaries', async () => {
+    const created = await request(`/api/projects/${projectId}/edges`, { method: 'POST', body: JSON.stringify({ sourceNodeId: nodeId, targetNodeId: secondNodeId, relationType: 'supports' }) }, cookieA);
+    expect(created.response.status).toBe(201);
+    const edgeId = (created.json as { edge: { id: string } }).edge.id;
+    const duplicate = await request(`/api/projects/${projectId}/edges`, { method: 'POST', body: JSON.stringify({ sourceNodeId: nodeId, targetNodeId: secondNodeId, relationType: 'supports' }) }, cookieA);
+    expect(duplicate.response.status).toBe(409);
+    const changed = await request(`/api/projects/${projectId}/edges/${edgeId}`, { method: 'PATCH', body: JSON.stringify({ relationType: 'generates' }) }, cookieA);
+    expect(changed.response.status).toBe(200);
+    const reloaded = await request(`/api/projects/${projectId}`, {}, cookieA);
+    expect((reloaded.json as { project: { edges: Array<{ id: string; relationType: string }> } }).project.edges).toContainEqual(expect.objectContaining({ id: edgeId, relationType: 'generates' }));
+    expect((await request(`/api/projects/${projectId}/edges`, { method: 'POST', body: JSON.stringify({ sourceNodeId: nodeId, targetNodeId: secondNodeId, relationType: 'blocks' }) }, cookieB)).response.status).toBe(404);
+    expect((await request(`/api/projects/${projectId}/edges/${edgeId}`, { method: 'DELETE' }, cookieA)).response.status).toBe(204);
+    const afterDelete = await request(`/api/projects/${projectId}`, {}, cookieA);
+    expect((afterDelete.json as { project: { edges: Array<{ id: string }> } }).project.edges).not.toContainEqual(expect.objectContaining({ id: edgeId }));
   });
 });

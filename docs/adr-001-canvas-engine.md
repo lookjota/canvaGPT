@@ -11,3 +11,9 @@ O núcleo atual precisa de pan/zoom, persistência de viewport, resize e edges s
 ## Consequências
 
 Há mais código de interação para manter, especialmente marquee, pan e conexões. A geometria de edge é derivada dos nodes e nunca persistida.
+
+## Interações da Fase 2B
+
+O modo Selecionar usa clique simples para seleção exclusiva, Ctrl/Cmd + clique para alternância e pointer down no fundo para marquee. O modo Mover tela e o botão do meio fazem pan; cabeçalhos fazem drag de node (ou do grupo selecionado), enquanto resize e handles de conexão têm zonas próprias. Marquee e drag convertem coordenadas de tela para mundo usando o viewport atual, portanto permanecem corretos em qualquer zoom. Escape cancela marquee/conexão e limpa a seleção; atalhos de delete e duplicação são ignorados em controles textuais.
+
+Edges persistem apenas sua relação lógica. Endpoints, arrowhead e labels são calculados em SVG a cada render a partir das dimensões e posições atuais dos nodes.
