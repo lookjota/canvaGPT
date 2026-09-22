@@ -171,4 +171,25 @@ describe('auth and PostgreSQL persistence', () => {
     const afterDelete = await request(`/api/projects/${projectId}`, {}, cookieA);
     expect((afterDelete.json as { project: { edges: Array<{ id: string }> } }).project.edges).not.toContainEqual(expect.objectContaining({ id: edgeId }));
   });
+
+  it('persists contextual conversations, snapshots, internal edges and ownership boundaries', async () => {
+    const contextEdge = await request(`/api/projects/${projectId}/edges`, { method: 'POST', body: JSON.stringify({ sourceNodeId: nodeId, targetNodeId: secondNodeId, relationType: 'supports' }) }, cookieA);
+    expect(contextEdge.response.status).toBe(201);
+    const conversation = await request(`/api/projects/${projectId}/conversations`, { method: 'POST', body: JSON.stringify({ title: 'Riscos' }) }, cookieA);
+    expect(conversation.response.status).toBe(201);
+    const conversationId = (conversation.json as { conversation: { id: string } }).conversation.id;
+    const sent = await request(`/api/projects/${projectId}/conversations/${conversationId}/messages`, { method: 'POST', body: JSON.stringify({ content: 'Analise a relação', contextNodeIds: [nodeId, secondNodeId] }) }, cookieA);
+    expect(sent.response.status).toBe(201);
+    expect(sent.json).toMatchObject({ userMessage: { role: 'user', content: 'Analise a relação' }, assistantMessage: { role: 'assistant' } });
+    const savedUserMessage = (sent.json as { userMessage: { id: string; contextNodes: Array<{ titleSnapshot: string; contentSnapshot: string }> } }).userMessage;
+    expect(savedUserMessage.contextNodes).toHaveLength(2);
+    await request(`/api/projects/${projectId}/nodes/${nodeId}`, { method: 'PATCH', body: JSON.stringify({ title: 'Node A editado', content: 'Novo conteúdo' }) }, cookieA);
+    const reloaded = await request(`/api/projects/${projectId}/conversations/${conversationId}`, {}, cookieA);
+    expect(reloaded.response.status).toBe(200);
+    const messages = (reloaded.json as { conversation: { messages: Array<{ role: string; contextNodes: Array<{ titleSnapshot: string; contentSnapshot: string }> }> } }).conversation.messages;
+    expect(messages[0].contextNodes[0]).toMatchObject({ titleSnapshot: 'Node A', contentSnapshot: 'Content A' });
+    expect((await request(`/api/projects/${projectId}/conversations/${conversationId}`, {}, cookieB)).response.status).toBe(404);
+    const invalidNode = await request(`/api/projects/${projectId}/conversations/${conversationId}/messages`, { method: 'POST', body: JSON.stringify({ content: 'invalid', contextNodeIds: ['11111111-1111-4111-8111-111111111111'] }) }, cookieA);
+    expect(invalidNode.response.status).toBe(400);
+  });
 });

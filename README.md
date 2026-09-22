@@ -19,6 +19,14 @@ npm run dev
 
 Frontend: http://localhost:5173. API: http://localhost:4000.
 
+## Conversas Orion AI
+
+Conversas pertencem a um projeto e ao usuário autenticado. O cliente envia somente IDs de nodes; o backend valida membership, carrega nodes/edges do PostgreSQL e cria `MessageContextNode` com snapshots de título, tipo e conteúdo. Apenas edges entre nodes presentes no contexto são enviados ao provider.
+
+O provider padrão usa a Responses API do OpenAI via `OPENAI_API_KEY` e `OPENAI_MODEL`; `AI_PROVIDER=mock` é usado automaticamente em testes e pode ser usado localmente sem uma chave. Se o provider falhar, a mensagem do usuário permanece persistida com seus snapshots e a API retorna `AI_PROVIDER_FAILED`; nenhuma resposta assistant falsa é criada.
+
+Limites atuais: 8.000 caracteres por mensagem, 20 nodes por request e aproximadamente 30.000 caracteres de contexto.
+
 ## Comandos
 
 `npm run build`, `npm run typecheck`, `npm run lint`, `npm test`, `npm run db:studio`.
