@@ -41,6 +41,10 @@ enum ProjectMemorySourceType {
   CANVAS_NODE
 }
 
+enum VisualProposalStatus {
+  PROPOSED
+}
+
 model Profile {
   id String @id @default(uuid()) @db.Uuid
   email String @unique
@@ -75,6 +79,7 @@ model Project {
   conversations Conversation[]
   attachments Attachment[]
   memories ProjectMemory[]
+  visualProposals VisualProposal[]
   @@index([ownerId, updatedAt])
   @@map("projects")
 }
@@ -183,6 +188,7 @@ model Conversation {
   project Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
   user Profile @relation(fields: [userId], references: [id], onDelete: Cascade)
   messages Message[]
+  visualProposals VisualProposal[]
   @@index([projectId, userId, updatedAt])
   @@map("conversations")
 }
@@ -196,7 +202,25 @@ model Message {
   conversation Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
   contextNodes MessageContextNode[]
   contextMemories MessageContextMemory[]
+  visualProposal VisualProposal?
   @@map("messages")
+}
+
+model VisualProposal {
+  id String @id @default(uuid()) @db.Uuid
+  projectId String @map("project_id") @db.Uuid
+  conversationId String @map("conversation_id") @db.Uuid
+  assistantMessageId String @unique @map("assistant_message_id") @db.Uuid
+  status VisualProposalStatus @default(PROPOSED)
+  protocolVersion String @map("protocol_version")
+  payload Json
+  createdAt DateTime @default(now()) @map("created_at")
+  project Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  conversation Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  assistantMessage Message @relation(fields: [assistantMessageId], references: [id], onDelete: Cascade)
+  @@index([projectId, createdAt])
+  @@index([conversationId, createdAt])
+  @@map("visual_proposals")
 }
 model MessageContextNode {
   messageId String @map("message_id") @db.Uuid

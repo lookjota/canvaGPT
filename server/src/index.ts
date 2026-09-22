@@ -9,6 +9,7 @@ import { hashPassword, requireAuth, requireProjectMember, setSession, verifyPass
 import { assertContextLimits, buildConversationContext, buildProjectMemoryContext } from './contextBuilder.js';
 import { createAiProvider, MockAiProvider, type AiProvider } from './aiProvider.js';
 import { projectMemoryCreateInput, projectMemoryKind, projectMemoryUpdateInput } from './projectMemory.js';
+import { parseStoredVisualProposal, validateProviderVisualResponse } from './visualProposal.js';
 
 export function createApp(options: { aiProvider?: AiProvider } = {}) {
 const app = express();
@@ -119,10 +120,21 @@ app.post('/api/projects/:projectId/memories/:memoryId/restore', requireAuth, asy
 
 const conversationFor = (projectId: string, conversationId: string, userId: string) => db.conversation.findFirst({ where: { id: conversationId, projectId, userId } });
 const messageInput = z.object({ content: z.string().trim().min(1).max(8000), contextNodeIds: z.array(id).max(20).default([]) });
-const conversationInclude = { messages: { orderBy: { createdAt: 'asc' as const }, include: { contextNodes: { orderBy: { titleSnapshot: 'asc' as const } }, contextMemories: { orderBy: [{ kindSnapshot: 'asc' as const }, { titleSnapshot: 'asc' as const }] } } } };
+const conversationInclude = { messages: { orderBy: { createdAt: 'asc' as const }, include: { contextNodes: { orderBy: { titleSnapshot: 'asc' as const } }, contextMemories: { orderBy: [{ kindSnapshot: 'asc' as const }, { titleSnapshot: 'asc' as const }] }, visualProposal: true } } };
+const safeProposal = (proposal: { id: string; projectId: string; conversationId: string; assistantMessageId: string; status: string; protocolVersion: string; payload: unknown; createdAt: Date } | null) => {
+  if (!proposal) return null;
+  const payload = parseStoredVisualProposal(proposal.payload);
+  return { ...proposal, payload };
+};
 app.post('/api/projects/:projectId/conversations', requireAuth, asyncRoute(async (req, res) => { const projectId = id.parse(req.params.projectId); if (!(await requireProjectMember(projectId, req.userId!))) return res.status(404).json({ error: 'NOT_FOUND' }); const input = z.object({ title: z.string().trim().max(120).optional() }).parse(req.body ?? {}); const conversation = await db.conversation.create({ data: { projectId, userId: req.userId!, title: input.title }, include: conversationInclude }); res.status(201).json({ conversation }); }));
 app.get('/api/projects/:projectId/conversations', requireAuth, asyncRoute(async (req, res) => { const projectId = id.parse(req.params.projectId); if (!(await requireProjectMember(projectId, req.userId!))) return res.status(404).json({ error: 'NOT_FOUND' }); const conversations = await db.conversation.findMany({ where: { projectId, userId: req.userId! }, orderBy: { updatedAt: 'desc' }, include: { _count: { select: { messages: true } } } }); res.json({ conversations }); }));
-app.get('/api/projects/:projectId/conversations/:conversationId', requireAuth, asyncRoute(async (req, res) => { const projectId = id.parse(req.params.projectId); if (!(await requireProjectMember(projectId, req.userId!))) return res.status(404).json({ error: 'NOT_FOUND' }); const conversation = await conversationFor(projectId, id.parse(req.params.conversationId), req.userId!); if (!conversation) return res.status(404).json({ error: 'NOT_FOUND' }); res.json({ conversation: await db.conversation.findUniqueOrThrow({ where: { id: conversation.id }, include: conversationInclude }) }); }));
+app.get('/api/projects/:projectId/conversations/:conversationId', requireAuth, asyncRoute(async (req, res) => { const projectId = id.parse(req.params.projectId); if (!(await requireProjectMember(projectId, req.userId!))) return res.status(404).json({ error: 'NOT_FOUND' }); const conversation = await conversationFor(projectId, id.parse(req.params.conversationId), req.userId!); if (!conversation) return res.status(404).json({ error: 'NOT_FOUND' }); const result = await db.conversation.findUniqueOrThrow({ where: { id: conversation.id }, include: conversationInclude }); res.json({ conversation: { ...result, messages: result.messages.map(message => ({ ...message, visualProposal: safeProposal(message.visualProposal) })) } }); }));
+app.get('/api/projects/:projectId/visual-proposals/:proposalId', requireAuth, asyncRoute(async (req, res) => {
+  const projectId = id.parse(req.params.projectId); if (!(await requireProjectMember(projectId, req.userId!))) return res.status(404).json({ error: 'NOT_FOUND' });
+  const proposal = await db.visualProposal.findFirst({ where: { id: id.parse(req.params.proposalId), projectId } });
+  if (!proposal) return res.status(404).json({ error: 'NOT_FOUND' });
+  res.json({ proposal: safeProposal(proposal) });
+}));
 app.post('/api/projects/:projectId/conversations/:conversationId/messages', requireAuth, asyncRoute(async (req, res) => {
   const projectId = id.parse(req.params.projectId); if (!(await requireProjectMember(projectId, req.userId!))) return res.status(404).json({ error: 'NOT_FOUND' });
   const conversationId = id.parse(req.params.conversationId); const conversation = await conversationFor(projectId, conversationId, req.userId!); if (!conversation) return res.status(404).json({ error: 'NOT_FOUND' });
@@ -138,12 +150,18 @@ app.post('/api/projects/:projectId/conversations/:conversationId/messages', requ
   console.info('AI context assembled', { projectId, nodeCount: uniqueIds.length, memoryCount: memoryContext.memories.length, contextCharacters: fullContext.length });
   const history = (await db.message.findMany({ where: { conversationId, role: { in: ['user', 'assistant'] } }, orderBy: { createdAt: 'asc' }, take: 20, select: { role: true, content: true } })).map(message => ({ role: message.role as 'user' | 'assistant', content: message.content }));
   const memorySnapshots = memoryContext.memories.map(memory => ({ memoryId: memory.id, kindSnapshot: memory.kind, titleSnapshot: memory.title, contentSnapshot: memory.content, confidenceSnapshot: memory.confidence, sourceTypeSnapshot: memory.sourceType, updatedAtSnapshot: memory.updatedAt }));
-  const snapshotInclude = { contextNodes: true, contextMemories: true };
+  const snapshotInclude = { contextNodes: true, contextMemories: true, visualProposal: true };
   const userMessage = await db.message.create({ data: { conversationId, role: 'user', content: input.content, contextNodeIds: uniqueIds, contextNodes: { create: nodes.map(node => ({ nodeId: node.id, titleSnapshot: node.title, typeSnapshot: node.type, contentSnapshot: node.content })) }, contextMemories: { create: memorySnapshots } }, include: snapshotInclude });
   try {
     const result = await (options.aiProvider ?? createAiProvider()).generate({ message: input.content, history, context: fullContext });
-    const assistant = await db.$transaction(async tx => { const message = await tx.message.create({ data: { conversationId, role: 'assistant', content: result.content, contextMemories: { create: memorySnapshots } }, include: snapshotInclude }); await tx.conversation.update({ where: { id: conversationId }, data: { updatedAt: new Date() } }); return message; });
-    res.status(201).json({ userMessage, assistantMessage: assistant });
+    const visual = validateProviderVisualResponse(result.content, result.proposedActions);
+    const assistant = await db.$transaction(async tx => {
+      const message = await tx.message.create({ data: { conversationId, role: 'assistant', content: visual.assistantText, contextMemories: { create: memorySnapshots } }, include: snapshotInclude });
+      if (visual.payload) await tx.visualProposal.create({ data: { projectId, conversationId, assistantMessageId: message.id, protocolVersion: visual.payload.protocolVersion, payload: visual.payload } });
+      await tx.conversation.update({ where: { id: conversationId }, data: { updatedAt: new Date() } });
+      return { ...message, visualProposal: visual.payload ? await tx.visualProposal.findUniqueOrThrow({ where: { assistantMessageId: message.id } }) : null };
+    });
+    res.status(201).json({ userMessage, assistantMessage: { ...assistant, visualProposal: safeProposal(assistant.visualProposal) } });
   } catch (error) { console.error('AI provider failed', getAiProviderErrorDetails(error)); res.status(502).json({ error: 'AI_PROVIDER_FAILED', messageId: userMessage.id }); }
 }));
 app.put('/api/projects/:projectId/view-state', requireAuth, asyncRoute(async (req, res) => { const projectId = id.parse(req.params.projectId); if (!(await requireProjectMember(projectId, req.userId!))) return res.status(404).json({ error: 'NOT_FOUND' }); const input = z.object({ viewportX: z.number().finite(), viewportY: z.number().finite(), zoom: z.number().min(.25).max(2.5), rightPanelOpen: z.boolean().optional(), rightPanelWidth: z.number().min(280).max(600).optional() }).parse(req.body); const viewState = await db.projectViewState.upsert({ where: { projectId_userId: { projectId, userId: req.userId! } }, create: { projectId, userId: req.userId!, ...input }, update: input }); res.json({ viewState }); }));
