@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { boundingBox, clampZoom, constrainNodeSize, dragDelta, edgeEndpoints, fitView, intersectsRect, normalizeViewport, rectFromPoints, screenToWorld, worldToScreen, zoomAroundPoint } from '../web/src/canvasGeometry';
+import { anchorPoint, boundingBox, chooseEdgeAnchors, clampZoom, constrainNodeSize, cubicBezierPoint, dragDelta, edgeCurve, edgeEndpoints, fitView, intersectsRect, normalizeViewport, panViewport, rectFromPoints, screenToWorld, worldToScreen, zoomAroundPoint } from '../web/src/canvasGeometry';
 
 describe('canvas geometry', () => {
   it('converts screen and world coordinates in both directions', () => {
@@ -10,6 +10,11 @@ describe('canvas geometry', () => {
 
   it('converts drag deltas according to zoom', () => {
     expect(dragDelta({ x: 100, y: -50 }, 2)).toEqual({ x: 50, y: -25 });
+  });
+
+  it('keeps canvas pan in screen pixels at every zoom', () => {
+    expect(panViewport({ x: 10, y: 20, zoom: 0.5 }, { x: 100, y: -40 })).toEqual({ x: 110, y: -20, zoom: 0.5 });
+    expect(panViewport({ x: 10, y: 20, zoom: 2 }, { x: 100, y: -40 })).toEqual({ x: 110, y: -20, zoom: 2 });
   });
 
   it('keeps the cursor world point stable while zooming', () => {
@@ -50,10 +55,29 @@ describe('canvas geometry', () => {
     expect(intersectsRect({ positionX: 300, positionY: 100, width: 80, height: 80 }, bounds)).toBe(false);
   });
 
-  it('anchors edges on the nearest node borders', () => {
-    const { start, end } = edgeEndpoints({ positionX: 0, positionY: 0, width: 100, height: 80 }, { positionX: 200, positionY: 10, width: 100, height: 80 });
-    expect(start.x).toBe(100);
-    expect(end.x).toBe(200);
-    expect(start.y).toBeGreaterThan(0);
+  it('chooses horizontal and vertical anchors from node centers', () => {
+    const node = { positionX: 0, positionY: 0, width: 100, height: 80 };
+    expect(chooseEdgeAnchors(node, { positionX: 200, positionY: 10, width: 100, height: 80 })).toEqual({ sourceAnchor: 'right', targetAnchor: 'left' });
+    expect(chooseEdgeAnchors({ ...node, positionX: 300 }, node)).toEqual({ sourceAnchor: 'left', targetAnchor: 'right' });
+    expect(chooseEdgeAnchors(node, { positionX: 20, positionY: 180, width: 100, height: 80 })).toEqual({ sourceAnchor: 'bottom', targetAnchor: 'top' });
+    expect(chooseEdgeAnchors({ ...node, positionY: 220 }, node)).toEqual({ sourceAnchor: 'top', targetAnchor: 'bottom' });
+  });
+
+  it('recalculates endpoints and controls as nodes cross positions', () => {
+    const source = { positionX: 0, positionY: 0, width: 100, height: 80 };
+    const target = { positionX: 200, positionY: 0, width: 100, height: 80 };
+    const curve = edgeCurve(source, target);
+    expect(curve.start).toEqual(anchorPoint(source, 'right'));
+    expect(curve.end).toEqual(anchorPoint(target, 'left'));
+    expect(curve.control1.x).toBeGreaterThan(curve.start.x);
+    const crossed = edgeCurve({ ...source, positionX: 300 }, target);
+    expect(crossed.sourceAnchor).toBe('left');
+    expect(crossed.targetAnchor).toBe('right');
+  });
+
+  it('calculates cubic midpoint and keeps legacy endpoint access', () => {
+    const start = { x: 0, y: 0 }; const control1 = { x: 10, y: 0 }; const control2 = { x: 10, y: 10 }; const end = { x: 0, y: 10 };
+    expect(cubicBezierPoint(start, control1, control2, end, 0.5)).toEqual({ x: 7.5, y: 5 });
+    expect(edgeEndpoints({ positionX: 0, positionY: 0, width: 100, height: 80 }, { positionX: 200, positionY: 10, width: 100, height: 80 }).start.x).toBe(100);
   });
 });
