@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { assertContextLimits, buildConversationContext, MAX_CONTEXT_CHARS, MAX_CONTEXT_NODES } from '../server/src/contextBuilder.js';
+import { assertContextLimits, buildConversationContext, buildProjectMemoryContext, MAX_CONTEXT_CHARS, MAX_CONTEXT_NODES } from '../server/src/contextBuilder.js';
 import { MockAiProvider } from '../server/src/aiProvider.js';
 
 const nodes = [
@@ -34,5 +34,23 @@ describe('conversation context', () => {
   it('provides a deterministic mock without external API calls', async () => {
     const response = await new MockAiProvider().generate({ message: 'Oi', history: [], context: 'PROJECT CONTEXT' });
     expect(response.content).toContain('Mock Orion response: Oi');
+  });
+  it('selects canonical memories by priority, recency and whole-record budget', () => {
+    const date = new Date('2026-09-22T10:00:00Z');
+    const result = buildProjectMemoryContext([
+      { id: 'gap', kind: 'GAP', title: 'Gap', content: 'G', confidence: null, sourceType: 'USER', updatedAt: date },
+      { id: 'fact', kind: 'FACT', title: 'Fact', content: 'F', confidence: .8, sourceType: 'USER', updatedAt: date },
+      { id: 'decision', kind: 'DECISION', title: 'Decision', content: 'D', confidence: 1, sourceType: 'CONVERSATION', updatedAt: date },
+      { id: 'hypothesis', kind: 'HYPOTHESIS', title: 'Hypothesis', content: 'H', confidence: .2, sourceType: 'USER', updatedAt: date },
+    ], 3, 10_000);
+    expect(result.memories.map(memory => memory.kind)).toEqual(['DECISION', 'FACT', 'HYPOTHESIS']);
+    expect(result.text).toContain('[HYPOTHESIS — UNCONFIRMED]');
+    expect(result.text).not.toContain('[GAP');
+    const bounded = buildProjectMemoryContext(result.memories, 20, 1);
+    expect(bounded.memories).toHaveLength(0);
+  });
+  it('keeps memory and selected canvas sections distinct', () => {
+    expect(buildProjectMemoryContext([], 20, 100).text).toBe('');
+    expect(buildConversationContext([nodes[0]]).text).toContain('[SELECTED CANVAS CONTEXT]');
   });
 });

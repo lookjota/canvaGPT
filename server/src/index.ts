@@ -6,7 +6,7 @@ import { z } from 'zod';
 import { db } from './db.js';
 import { env } from './env.js';
 import { hashPassword, requireAuth, requireProjectMember, setSession, verifyPassword } from './auth.js';
-import { assertContextLimits, buildConversationContext } from './contextBuilder.js';
+import { assertContextLimits, buildConversationContext, buildProjectMemoryContext } from './contextBuilder.js';
 import { createAiProvider, MockAiProvider, type AiProvider } from './aiProvider.js';
 import { projectMemoryCreateInput, projectMemoryKind, projectMemoryUpdateInput } from './projectMemory.js';
 
@@ -119,7 +119,7 @@ app.post('/api/projects/:projectId/memories/:memoryId/restore', requireAuth, asy
 
 const conversationFor = (projectId: string, conversationId: string, userId: string) => db.conversation.findFirst({ where: { id: conversationId, projectId, userId } });
 const messageInput = z.object({ content: z.string().trim().min(1).max(8000), contextNodeIds: z.array(id).max(20).default([]) });
-const conversationInclude = { messages: { orderBy: { createdAt: 'asc' as const }, include: { contextNodes: { orderBy: { titleSnapshot: 'asc' as const } } } } };
+const conversationInclude = { messages: { orderBy: { createdAt: 'asc' as const }, include: { contextNodes: { orderBy: { titleSnapshot: 'asc' as const } }, contextMemories: { orderBy: [{ kindSnapshot: 'asc' as const }, { titleSnapshot: 'asc' as const }] } } } };
 app.post('/api/projects/:projectId/conversations', requireAuth, asyncRoute(async (req, res) => { const projectId = id.parse(req.params.projectId); if (!(await requireProjectMember(projectId, req.userId!))) return res.status(404).json({ error: 'NOT_FOUND' }); const input = z.object({ title: z.string().trim().max(120).optional() }).parse(req.body ?? {}); const conversation = await db.conversation.create({ data: { projectId, userId: req.userId!, title: input.title }, include: conversationInclude }); res.status(201).json({ conversation }); }));
 app.get('/api/projects/:projectId/conversations', requireAuth, asyncRoute(async (req, res) => { const projectId = id.parse(req.params.projectId); if (!(await requireProjectMember(projectId, req.userId!))) return res.status(404).json({ error: 'NOT_FOUND' }); const conversations = await db.conversation.findMany({ where: { projectId, userId: req.userId! }, orderBy: { updatedAt: 'desc' }, include: { _count: { select: { messages: true } } } }); res.json({ conversations }); }));
 app.get('/api/projects/:projectId/conversations/:conversationId', requireAuth, asyncRoute(async (req, res) => { const projectId = id.parse(req.params.projectId); if (!(await requireProjectMember(projectId, req.userId!))) return res.status(404).json({ error: 'NOT_FOUND' }); const conversation = await conversationFor(projectId, id.parse(req.params.conversationId), req.userId!); if (!conversation) return res.status(404).json({ error: 'NOT_FOUND' }); res.json({ conversation: await db.conversation.findUniqueOrThrow({ where: { id: conversation.id }, include: conversationInclude }) }); }));
@@ -131,11 +131,18 @@ app.post('/api/projects/:projectId/conversations/:conversationId/messages', requ
   if (nodes.length !== uniqueIds.length) return res.status(400).json({ error: 'INVALID_CONTEXT_NODES' });
   const edges = await db.canvasEdge.findMany({ where: { projectId, sourceNodeId: { in: uniqueIds }, targetNodeId: { in: uniqueIds } }, select: { sourceNodeId: true, targetNodeId: true, relationType: true, label: true } });
   const context = buildConversationContext(nodes, edges); try { assertContextLimits(uniqueIds, nodes, context.text); } catch (error) { return res.status(400).json({ error: error instanceof Error ? error.message : 'CONTEXT_INVALID' }); }
+  const memories = await db.projectMemory.findMany({ where: { projectId, status: 'ACTIVE' }, orderBy: [{ kind: 'asc' }, { updatedAt: 'desc' }, { id: 'asc' }], select: { id: true, kind: true, title: true, content: true, confidence: true, sourceType: true, updatedAt: true } });
+  const memoryContext = buildProjectMemoryContext(memories, env.PROJECT_MEMORY_MAX_ITEMS, env.PROJECT_MEMORY_MAX_CHARS);
+  const fullContext = [memoryContext.text, uniqueIds.length ? context.text : ''].filter(Boolean).join('\n\n');
+  if (fullContext.length > 30000) return res.status(400).json({ error: 'CONTEXT_TOO_LARGE' });
+  console.info('AI context assembled', { projectId, nodeCount: uniqueIds.length, memoryCount: memoryContext.memories.length, contextCharacters: fullContext.length });
   const history = (await db.message.findMany({ where: { conversationId, role: { in: ['user', 'assistant'] } }, orderBy: { createdAt: 'asc' }, take: 20, select: { role: true, content: true } })).map(message => ({ role: message.role as 'user' | 'assistant', content: message.content }));
-  const userMessage = await db.message.create({ data: { conversationId, role: 'user', content: input.content, contextNodeIds: uniqueIds, contextNodes: { create: nodes.map(node => ({ nodeId: node.id, titleSnapshot: node.title, typeSnapshot: node.type, contentSnapshot: node.content })) } }, include: { contextNodes: true } });
+  const memorySnapshots = memoryContext.memories.map(memory => ({ memoryId: memory.id, kindSnapshot: memory.kind, titleSnapshot: memory.title, contentSnapshot: memory.content, confidenceSnapshot: memory.confidence, sourceTypeSnapshot: memory.sourceType, updatedAtSnapshot: memory.updatedAt }));
+  const snapshotInclude = { contextNodes: true, contextMemories: true };
+  const userMessage = await db.message.create({ data: { conversationId, role: 'user', content: input.content, contextNodeIds: uniqueIds, contextNodes: { create: nodes.map(node => ({ nodeId: node.id, titleSnapshot: node.title, typeSnapshot: node.type, contentSnapshot: node.content })) }, contextMemories: { create: memorySnapshots } }, include: snapshotInclude });
   try {
-    const result = await (options.aiProvider ?? createAiProvider()).generate({ message: input.content, history, context: uniqueIds.length ? context.text : '' });
-    const assistant = await db.$transaction(async tx => { const message = await tx.message.create({ data: { conversationId, role: 'assistant', content: result.content } }); await tx.conversation.update({ where: { id: conversationId }, data: { updatedAt: new Date() } }); return message; });
+    const result = await (options.aiProvider ?? createAiProvider()).generate({ message: input.content, history, context: fullContext });
+    const assistant = await db.$transaction(async tx => { const message = await tx.message.create({ data: { conversationId, role: 'assistant', content: result.content, contextMemories: { create: memorySnapshots } }, include: snapshotInclude }); await tx.conversation.update({ where: { id: conversationId }, data: { updatedAt: new Date() } }); return message; });
     res.status(201).json({ userMessage, assistantMessage: assistant });
   } catch (error) { console.error('AI provider failed', getAiProviderErrorDetails(error)); res.status(502).json({ error: 'AI_PROVIDER_FAILED', messageId: userMessage.id }); }
 }));

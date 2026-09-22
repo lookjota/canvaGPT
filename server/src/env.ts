@@ -8,4 +8,6 @@ export const env = z.object({
   AI_PROVIDER: z.enum(['openai', 'mock']).default(process.env.NODE_ENV === 'test' ? 'mock' : 'openai'),
   OPENAI_API_KEY: z.string().optional(),
   OPENAI_MODEL: z.string().default('gpt-5-mini'),
+  PROJECT_MEMORY_MAX_ITEMS: z.coerce.number().int().min(0).default(20),
+  PROJECT_MEMORY_MAX_CHARS: z.coerce.number().int().min(0).default(12000),
 }).parse(process.env);

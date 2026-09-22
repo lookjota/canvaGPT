@@ -195,6 +195,7 @@ model Message {
   createdAt DateTime @default(now()) @map("created_at")
   conversation Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
   contextNodes MessageContextNode[]
+  contextMemories MessageContextMemory[]
   @@map("messages")
 }
 model MessageContextNode {
@@ -208,6 +209,20 @@ model MessageContextNode {
   @@id([messageId, nodeId])
   @@index([nodeId])
   @@map("message_context_nodes")
+}
+model MessageContextMemory {
+  messageId String @map("message_id") @db.Uuid
+  memoryId String @map("memory_id") @db.Uuid
+  kindSnapshot ProjectMemoryKind @map("kind_snapshot")
+  titleSnapshot String? @map("title_snapshot")
+  contentSnapshot String @map("content_snapshot")
+  confidenceSnapshot Float? @map("confidence_snapshot")
+  sourceTypeSnapshot ProjectMemorySourceType @map("source_type_snapshot")
+  updatedAtSnapshot DateTime @map("updated_at_snapshot")
+  message Message @relation(fields: [messageId], references: [id], onDelete: Cascade)
+  @@id([messageId, memoryId])
+  @@index([memoryId])
+  @@map("message_context_memories")
 }
 model Attachment {
   id String @id @default(uuid()) @db.Uuid
