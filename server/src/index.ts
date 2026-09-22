@@ -7,14 +7,28 @@ import { db } from './db.js';
 import { env } from './env.js';
 import { hashPassword, requireAuth, requireProjectMember, setSession, verifyPassword } from './auth.js';
 import { assertContextLimits, buildConversationContext } from './contextBuilder.js';
-import { createAiProvider } from './aiProvider.js';
+import { createAiProvider, MockAiProvider, type AiProvider } from './aiProvider.js';
 
-export const app = express();
+export function createApp(options: { aiProvider?: AiProvider } = {}) {
+const app = express();
 app.use(cors({ origin: env.WEB_ORIGIN, credentials: true }));
 app.use(express.json({ limit: '2mb' }));
 app.use(cookieParser());
 const asyncRoute = (fn: express.RequestHandler): express.RequestHandler => (req, res, next) => Promise.resolve(fn(req, res, next)).catch(next);
 const id = z.string().uuid();
+const getAiProviderErrorDetails = (error: unknown) => {
+  const details = error instanceof Error ? { name: error.name, message: error.message } : { name: 'UnknownError' };
+  if (!error || typeof error !== 'object') return details;
+  const providerError = error as { status?: unknown; code?: unknown; type?: unknown; requestID?: unknown; requestId?: unknown };
+  return {
+    ...details,
+    ...(typeof providerError.status === 'number' ? { status: providerError.status } : {}),
+    ...(typeof providerError.code === 'string' ? { code: providerError.code } : {}),
+    ...(typeof providerError.type === 'string' ? { type: providerError.type } : {}),
+    ...(typeof providerError.requestID === 'string' ? { requestId: providerError.requestID } : {}),
+    ...(typeof providerError.requestId === 'string' ? { requestId: providerError.requestId } : {}),
+  };
+};
 
 app.get('/api/health', (_req, res) => res.json({ ok: true }));
 app.post('/api/auth/register', asyncRoute(async (req, res) => {
@@ -77,10 +91,10 @@ app.post('/api/projects/:projectId/conversations/:conversationId/messages', requ
   const history = (await db.message.findMany({ where: { conversationId, role: { in: ['user', 'assistant'] } }, orderBy: { createdAt: 'asc' }, take: 20, select: { role: true, content: true } })).map(message => ({ role: message.role as 'user' | 'assistant', content: message.content }));
   const userMessage = await db.message.create({ data: { conversationId, role: 'user', content: input.content, contextNodeIds: uniqueIds, contextNodes: { create: nodes.map(node => ({ nodeId: node.id, titleSnapshot: node.title, typeSnapshot: node.type, contentSnapshot: node.content })) } }, include: { contextNodes: true } });
   try {
-    const result = await createAiProvider().generate({ message: input.content, history, context: uniqueIds.length ? context.text : '' });
+    const result = await (options.aiProvider ?? createAiProvider()).generate({ message: input.content, history, context: uniqueIds.length ? context.text : '' });
     const assistant = await db.$transaction(async tx => { const message = await tx.message.create({ data: { conversationId, role: 'assistant', content: result.content } }); await tx.conversation.update({ where: { id: conversationId }, data: { updatedAt: new Date() } }); return message; });
     res.status(201).json({ userMessage, assistantMessage: assistant });
-  } catch (error) { console.error('AI provider failed', error instanceof Error ? error.name : 'UnknownError'); res.status(502).json({ error: 'AI_PROVIDER_FAILED', messageId: userMessage.id }); }
+  } catch (error) { console.error('AI provider failed', getAiProviderErrorDetails(error)); res.status(502).json({ error: 'AI_PROVIDER_FAILED', messageId: userMessage.id }); }
 }));
 app.put('/api/projects/:projectId/view-state', requireAuth, asyncRoute(async (req, res) => { const projectId = id.parse(req.params.projectId); if (!(await requireProjectMember(projectId, req.userId!))) return res.status(404).json({ error: 'NOT_FOUND' }); const input = z.object({ viewportX: z.number().finite(), viewportY: z.number().finite(), zoom: z.number().min(.25).max(2.5), rightPanelOpen: z.boolean().optional(), rightPanelWidth: z.number().min(280).max(600).optional() }).parse(req.body); const viewState = await db.projectViewState.upsert({ where: { projectId_userId: { projectId, userId: req.userId! } }, create: { projectId, userId: req.userId!, ...input }, update: input }); res.json({ viewState }); }));
 
@@ -93,3 +107,7 @@ app.use((err: unknown, _req: express.Request, res: express.Response, _next: expr
 });
 
 if (process.env.NODE_ENV !== 'test') app.listen(env.PORT, () => console.log(`Orion API listening on http://localhost:${env.PORT}`));
+return app;
+}
+
+export const app = createApp({ aiProvider: process.env.NODE_ENV === 'test' ? new MockAiProvider() : undefined });
